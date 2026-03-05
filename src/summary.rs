@@ -11,7 +11,11 @@ pub fn summaries_dir() -> PathBuf {
 }
 
 pub fn summary_path(session_id: &str) -> PathBuf {
-    summaries_dir().join(format!("{}.md", session_id))
+    // Sanitize: keep only chars valid in a UUID/session-id to prevent path traversal
+    let safe: String = session_id.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    summaries_dir().join(format!("{}.md", safe))
 }
 
 pub fn read_summary(path: &Path) -> Option<String> {

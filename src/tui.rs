@@ -24,6 +24,7 @@ struct AppState {
     filter: String,
     filter_mode: bool,
     summaries: Arc<Mutex<std::collections::HashMap<String, String>>>,
+    generating: Arc<Mutex<std::collections::HashSet<String>>>,
 }
 
 impl AppState {
@@ -40,6 +41,7 @@ impl AppState {
             filter: String::new(),
             filter_mode: false,
             summaries: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            generating: Arc::new(Mutex::new(std::collections::HashSet::new())),
         }
     }
 
@@ -49,7 +51,11 @@ impl AppState {
             .sessions
             .iter()
             .enumerate()
-            .filter(|(_, s)| q.is_empty() || s.project_name.to_lowercase().contains(&q))
+            .filter(|(_, s)| {
+                q.is_empty()
+                    || s.project_name.to_lowercase().contains(&q)
+                    || s.summary.to_lowercase().contains(&q)
+            })
             .map(|(i, _)| i)
             .collect();
         if !self.filtered.is_empty() {
@@ -88,11 +94,8 @@ pub async fn run() -> Result<()> {
         }
     }
 
-    let generating: Arc<Mutex<std::collections::HashSet<String>>> =
-        Arc::new(Mutex::new(std::collections::HashSet::new()));
-
     // Run event loop, always clean up terminal regardless of result
-    let result = run_event_loop(&mut terminal, &mut app, &generating).await;
+    let result = run_event_loop(&mut terminal, &mut app).await;
 
     // Always clean up terminal
     let _ = disable_raw_mode();
@@ -105,7 +108,6 @@ pub async fn run() -> Result<()> {
 async fn run_event_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     app: &mut AppState,
-    generating: &Arc<Mutex<std::collections::HashSet<String>>>,
 ) -> Result<()> {
     loop {
         terminal.draw(|f| draw(f, app))?;
@@ -150,9 +152,10 @@ async fn run_event_loop(
                             let id = s.session_id.clone();
                             let jsonl = s.jsonl_path.clone();
                             let summaries = app.summaries.clone();
+                            let generating = app.generating.clone();
                             app.summaries.lock().expect("summary mutex poisoned").remove(&id);
-                            generating.lock().expect("generating mutex poisoned").remove(&id);
-                            spawn_summary_generation(id, jsonl, summaries, generating.clone());
+                            app.generating.lock().expect("generating mutex poisoned").remove(&id);
+                            spawn_summary_generation(id, jsonl, summaries, generating);
                         }
                     }
 
@@ -171,19 +174,20 @@ async fn run_event_loop(
             }
         }
 
-        // Trigger on-demand summary generation for selected session
+        // Auto-trigger summary for small sessions (≤20 msgs); larger sessions require manual `r`
         if let Some(s) = app.selected_session() {
-            let id = s.session_id.clone();
-            let has_summary = app.summaries.lock().expect("summary mutex poisoned").contains_key(&id);
-            let is_generating = generating.lock().expect("generating mutex poisoned").contains(&id);
-            if !has_summary && !is_generating {
-                let jsonl = s.jsonl_path.clone();
-                let summaries = app.summaries.clone();
-                app.summaries
-                    .lock()
-                    .expect("summary mutex poisoned")
-                    .insert(id.clone(), "Generating summary...".to_string());
-                spawn_summary_generation(id, jsonl, summaries, generating.clone());
+            if s.message_count <= 20 {
+                let id = s.session_id.clone();
+                let has_summary = app.summaries.lock().expect("summary mutex poisoned").contains_key(&id);
+                let is_generating = app.generating.lock().expect("generating mutex poisoned").contains(&id);
+                if !has_summary && !is_generating {
+                    let jsonl = s.jsonl_path.clone();
+                    let summaries = app.summaries.clone();
+                    let generating = app.generating.clone();
+                    app.summaries.lock().expect("summary mutex poisoned")
+                        .insert(id.clone(), "Generating summary...".to_string());
+                    spawn_summary_generation(id, jsonl, summaries, generating);
+                }
             }
         }
     }
@@ -198,8 +202,11 @@ fn spawn_summary_generation(
 ) {
     generating.lock().expect("generating mutex poisoned").insert(id.clone());
     tokio::spawn(async move {
-        let path = std::path::Path::new(&jsonl);
-        if let Ok(msgs) = crate::sessions::parse_messages(path) {
+        let msgs = tokio::task::spawn_blocking({
+            let jsonl = jsonl.clone();
+            move || crate::sessions::parse_messages(std::path::Path::new(&jsonl))
+        }).await.ok().and_then(|r| r.ok());
+        if let Some(msgs) = msgs {
             match crate::summary::generate_summary(&msgs).await {
                 Ok(text) => {
                     let out = crate::summary::summary_path(&id);
@@ -220,11 +227,34 @@ fn spawn_summary_generation(
 
 fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
     let area = f.area();
+
+    const MAX_JOB_LINES: usize = 3;
+    let jobs: Vec<String> = {
+        let gen = app.generating.lock().expect("generating mutex poisoned");
+        let sum = app.summaries.lock().expect("summary mutex poisoned");
+        let mut items: Vec<String> = gen.iter().map(|id| {
+            let label = app.sessions.iter()
+                .find(|s| &s.session_id == id)
+                .map(|s| if !s.summary.is_empty() { s.summary.clone() } else { s.project_name.clone() })
+                .unwrap_or_else(|| id[..8.min(id.len())].to_string());
+            let status = sum.get(id).map(|v| v.as_str()).unwrap_or("waiting...");
+            format!("⟳  {} — {}", label, status)
+        }).collect();
+        if items.len() > MAX_JOB_LINES {
+            let extra = items.len() - MAX_JOB_LINES;
+            items.truncate(MAX_JOB_LINES);
+            items.push(format!("   … and {} more", extra));
+        }
+        items
+    };
+    let jobs_height = if jobs.is_empty() { 0 } else { (jobs.len() + 2) as u16 };
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
             Constraint::Min(0),
+            Constraint::Length(jobs_height),
             Constraint::Length(1),
         ])
         .split(area);
@@ -250,12 +280,23 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
     draw_list(f, app, panes[0]);
     draw_preview(f, app, panes[1]);
 
+    // Background jobs panel
+    if jobs_height > 0 {
+        let text = jobs.join("\n");
+        let jobs_panel = Paragraph::new(text)
+            .block(Block::default().borders(Borders::ALL)
+                .title(" Background ")
+                .border_style(Style::default().fg(Color::Yellow)))
+            .style(Style::default().fg(Color::Yellow));
+        f.render_widget(jobs_panel, chunks[2]);
+    }
+
     // Status bar
     let status = Paragraph::new(
         " Enter: resume  j/k: navigate  /: filter  Esc: clear filter  r: regenerate  q: quit",
     )
     .style(Style::default().fg(Color::DarkGray));
-    f.render_widget(status, chunks[2]);
+    f.render_widget(status, chunks[3]);
 }
 
 fn draw_list(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
@@ -265,12 +306,15 @@ fn draw_list(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
         .map(|&i| {
             let s = &app.sessions[i];
             let dt = format_time(s.modified);
+            let folder = path_last_n(&s.project_path, 3);
             let line = Line::from(vec![
-                Span::styled(
-                    format!("{} ", dt),
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::raw(s.project_name.clone()),
+                Span::styled(format!("{} ", dt), Style::default().fg(Color::DarkGray)),
+                Span::raw(format!("{:<28}", if s.summary.is_empty() {
+                    truncate(&format!("[{}]", s.project_name), 27)
+                } else {
+                    truncate(&s.summary, 27)
+                })),
+                Span::styled(folder, Style::default().fg(Color::DarkGray)),
             ]);
             ListItem::new(line)
         })
@@ -285,7 +329,8 @@ fn draw_list(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
         )
         .highlight_style(
             Style::default()
-                .bg(Color::DarkGray)
+                .bg(Color::Blue)
+                .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("► ");
@@ -297,20 +342,48 @@ fn draw_preview(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
     let content = match app.selected_session() {
         None => "No session selected".to_string(),
         Some(s) => {
+            let fallback = if !s.summary.is_empty() {
+                s.summary.clone()
+            } else {
+                "[press r to generate summary]".to_string()
+            };
             let summary = app
                 .summaries
                 .lock()
                 .expect("summary mutex poisoned")
                 .get(&s.session_id)
                 .cloned()
-                .unwrap_or_else(|| "[hover to generate summary]".to_string());
+                .unwrap_or(fallback);
+
+            let branch_line = if !s.git_branch.is_empty() {
+                format!("\nBRANCH:   {}", s.git_branch)
+            } else {
+                String::new()
+            };
+
+            let first_msg_line = if !s.first_user_msg.is_empty() {
+                format!("\nFIRST:    {}", s.first_user_msg)
+            } else {
+                String::new()
+            };
+
+            let generated_line = {
+                let path = crate::summary::summary_path(&s.session_id);
+                match std::fs::metadata(&path).and_then(|m| m.modified()) {
+                    Ok(t) => format!("\n\n─── generated {} ───", format_time(t)),
+                    Err(_) => String::new(),
+                }
+            };
+
             format!(
-                "PROJECT:  {}\nMSGS:     {}  |  {}\nSESSION:  {}...\n\n{}",
+                "PROJECT:  {}\nMSGS:     {}  |  {}{}{}\n\n{}{}",
                 s.project_path,
                 s.message_count,
                 format_time(s.modified),
-                &s.session_id[..8.min(s.session_id.len())],
-                summary
+                branch_line,
+                first_msg_line,
+                summary,
+                generated_line,
             )
         }
     };
@@ -326,8 +399,27 @@ fn format_time(t: std::time::SystemTime) -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    chrono::DateTime::from_timestamp(secs as i64, 0)
+    // SGT = UTC+8
+    const SGT_OFFSET_SECS: i64 = 8 * 3600;
+    chrono::DateTime::from_timestamp(secs as i64 + SGT_OFFSET_SECS, 0)
         .unwrap_or_default()
-        .format("%Y-%m-%d %H:%M")
+        .format("%m-%d %H:%M")
         .to_string()
+}
+
+fn path_last_n(path: &str, n: usize) -> String {
+    let parts: Vec<&str> = path.trim_end_matches('/')
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect();
+    let start = parts.len().saturating_sub(n);
+    parts[start..].join("/")
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        format!("{}…", s.chars().take(max - 1).collect::<String>())
+    }
 }

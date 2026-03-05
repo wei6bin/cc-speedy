@@ -1,0 +1,27 @@
+{
+  "originalPath": "/home/weibin/repo/ai/cc-speedy",
+  "entries": [
+    {
+      "sessionId": "abc123def456abc1",
+      "fullPath": "/home/weibin/.claude/projects/-home-weibin-repo-ai-cc-speedy/abc123def456abc1.jsonl",
+      "fileMtime": 1709654400000,
+      "firstPrompt": "Implement the sessions-index integration feature",
+      "summary": "sessions-index.json Integration + UI Improvements",
+      "messageCount": 42,
+      "modified": "2024-03-05T12:00:00Z",
+      "gitBranch": "feature/sessions-index",
+      "isSidechain": false
+    },
+    {
+      "sessionId": "short001",
+      "fullPath": "/home/weibin/.claude/projects/-home-weibin-repo-ai-cc-speedy/short001.jsonl",
+      "fileMtime": 1709640000000,
+      "firstPrompt": "hi",
+      "summary": "",
+      "messageCount": 2,
+      "modified": "2024-03-05T08:00:00Z",
+      "gitBranch": "",
+      "isSidechain": false
+    }
+  ]
+}

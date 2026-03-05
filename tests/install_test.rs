@@ -71,5 +71,5 @@ fn test_install_adds_hook_to_empty_settings() {
     let session_end = settings["hooks"]["SessionEnd"].as_array().unwrap();
     assert_eq!(session_end.len(), 1);
     let cmd = session_end[0]["hooks"][0]["command"].as_str().unwrap();
-    assert_eq!(cmd, "/bin/cc-speedy summarize");
+    assert_eq!(cmd, "\"/bin/cc-speedy\" summarize");
 }

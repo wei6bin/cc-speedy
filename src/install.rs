@@ -4,10 +4,12 @@ use serde_json::{json, Value};
 use std::path::Path;
 
 pub fn build_hook_entry(binary_path: &str) -> Value {
+    // Quote the binary path to handle spaces; "summarize" is a literal safe subcommand
+    let command = format!("\"{}\" summarize", binary_path.replace('"', "\\\""));
     json!({
         "hooks": [{
             "type": "command",
-            "command": format!("{} summarize", binary_path)
+            "command": command
         }]
     })
 }

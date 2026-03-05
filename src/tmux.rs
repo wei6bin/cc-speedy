@@ -30,36 +30,39 @@ pub fn session_exists(name: &str) -> bool {
 }
 
 pub fn resume_in_tmux(session_name: &str, project_path: &str, session_id: &str) -> Result<()> {
-    let claude_cmd = format!("claude --resume {}", session_id);
+    // Pass claude args directly — never via "sh -c" to avoid shell injection
+    let new_session = |detach: bool| -> Result<()> {
+        let mut cmd = std::process::Command::new("tmux");
+        cmd.arg("new-session");
+        if detach { cmd.arg("-d"); }
+        cmd.args(["-s", session_name, "-c", project_path,
+                  "claude", "--resume", session_id]);
+        let status = cmd.status()?;
+        if !status.success() {
+            anyhow::bail!("tmux new-session failed: {}", status);
+        }
+        Ok(())
+    };
+
     if is_inside_tmux() {
         if session_exists(session_name) {
             let status = std::process::Command::new("tmux")
                 .args(["switch-client", "-t", session_name])
                 .status()?;
             if !status.success() {
-                anyhow::bail!("tmux command failed with status: {}", status);
+                anyhow::bail!("tmux switch-client failed: {}", status);
             }
         } else {
-            let status = std::process::Command::new("tmux")
-                .args(["new-session", "-d", "-s", session_name, "-c", project_path, "sh", "-c", &claude_cmd])
-                .status()?;
-            if !status.success() {
-                anyhow::bail!("tmux command failed with status: {}", status);
-            }
+            new_session(true)?;
             let status = std::process::Command::new("tmux")
                 .args(["switch-client", "-t", session_name])
                 .status()?;
             if !status.success() {
-                anyhow::bail!("tmux command failed with status: {}", status);
+                anyhow::bail!("tmux switch-client failed: {}", status);
             }
         }
     } else {
-        let status = std::process::Command::new("tmux")
-            .args(["new-session", "-s", session_name, "-c", project_path, "sh", "-c", &claude_cmd])
-            .status()?;
-        if !status.success() {
-            anyhow::bail!("tmux command failed with status: {}", status);
-        }
+        new_session(false)?;
     }
     Ok(())
 }

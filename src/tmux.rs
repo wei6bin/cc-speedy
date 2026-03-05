@@ -1,11 +1,15 @@
 use anyhow::Result;
 
+/// Derive tmux session name: last 2 path segments joined with "-", sanitized, max 50 chars
 pub fn session_name_from_path(path: &str) -> String {
-    let parts: Vec<&str> = path.trim_end_matches('/').split('/').collect();
+    let parts: Vec<&str> = path.trim_end_matches('/')
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect();
     let name = match parts.len() {
         0 => "cc-speedy".to_string(),
         1 => parts[0].to_string(),
-        n => parts[n-2..].join("-"),
+        n => format!("{}-{}", parts[n-2], parts[n-1]),
     };
     name.chars()
         .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')

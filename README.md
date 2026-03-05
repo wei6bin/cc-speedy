@@ -2,31 +2,18 @@
 
 Terminal TUI to browse and resume Claude Code sessions in named tmux sessions, with AI-generated conversation summaries.
 
-## Install (prebuilt binary)
+## Install
 
-Pick the binary for your platform from the [latest release](https://github.com/wei6bin/cc-speedy/releases/latest):
-
-**Linux (x86_64):**
+**One-liner (Linux / macOS — auto-detects platform):**
 ```bash
-curl -sL https://github.com/wei6bin/cc-speedy/releases/latest/download/cc-speedy-x86_64-unknown-linux-musl.tar.gz \
-  | tar xz && sudo mv cc-speedy-x86_64-unknown-linux-musl /usr/local/bin/cc-speedy
+curl -fsSL https://raw.githubusercontent.com/wei6bin/cc-speedy/master/install.sh | bash
 ```
 
-**macOS Apple Silicon (M1/M2/M3):**
-```bash
-curl -sL https://github.com/wei6bin/cc-speedy/releases/latest/download/cc-speedy-aarch64-apple-darwin.tar.gz \
-  | tar xz && sudo mv cc-speedy-aarch64-apple-darwin /usr/local/bin/cc-speedy
-```
+This downloads the right binary, puts it in `/usr/local/bin`, and registers the SessionEnd hook — all in one step.
 
-**macOS Intel:**
+To install to a custom directory:
 ```bash
-curl -sL https://github.com/wei6bin/cc-speedy/releases/latest/download/cc-speedy-x86_64-apple-darwin.tar.gz \
-  | tar xz && sudo mv cc-speedy-x86_64-apple-darwin /usr/local/bin/cc-speedy
-```
-
-Then register the SessionEnd hook:
-```bash
-cc-speedy install
+BIN_DIR=~/.local/bin curl -fsSL https://raw.githubusercontent.com/wei6bin/cc-speedy/master/install.sh | bash
 ```
 
 ## Install (from source)

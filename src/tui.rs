@@ -83,17 +83,32 @@ pub async fn run() -> Result<()> {
         if let Some(content) = read_summary(&path) {
             app.summaries
                 .lock()
-                .unwrap()
+                .expect("summary mutex poisoned")
                 .insert(session.session_id.clone(), content);
         }
     }
 
-    // Track which sessions have had summary generation triggered
     let generating: Arc<Mutex<std::collections::HashSet<String>>> =
         Arc::new(Mutex::new(std::collections::HashSet::new()));
 
+    // Run event loop, always clean up terminal regardless of result
+    let result = run_event_loop(&mut terminal, &mut app, &generating).await;
+
+    // Always clean up terminal
+    let _ = disable_raw_mode();
+    let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
+    let _ = terminal.show_cursor();
+
+    result
+}
+
+async fn run_event_loop(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    app: &mut AppState,
+    generating: &Arc<Mutex<std::collections::HashSet<String>>>,
+) -> Result<()> {
     loop {
-        terminal.draw(|f| draw(f, &mut app))?;
+        terminal.draw(|f| draw(f, app))?;
 
         if event::poll(std::time::Duration::from_millis(200))? {
             if let Event::Key(key) = event::read()? {
@@ -135,9 +150,8 @@ pub async fn run() -> Result<()> {
                             let id = s.session_id.clone();
                             let jsonl = s.jsonl_path.clone();
                             let summaries = app.summaries.clone();
-                            // Force regenerate — remove from cache and generating set
-                            summaries.lock().unwrap().remove(&id);
-                            generating.lock().unwrap().remove(&id);
+                            app.summaries.lock().expect("summary mutex poisoned").remove(&id);
+                            generating.lock().expect("generating mutex poisoned").remove(&id);
                             spawn_summary_generation(id, jsonl, summaries, generating.clone());
                         }
                     }
@@ -147,11 +161,8 @@ pub async fn run() -> Result<()> {
                             let name = crate::tmux::session_name_from_path(&s.project_path);
                             let path = s.project_path.clone();
                             let id = s.session_id.clone();
-                            // Restore terminal before handing off to tmux
-                            disable_raw_mode()?;
-                            execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-                            crate::tmux::resume_in_tmux(&name, &path, &id)?;
-                            return Ok(());
+                            // Note: terminal cleanup happens in run() after this returns
+                            return crate::tmux::resume_in_tmux(&name, &path, &id);
                         }
                     }
 
@@ -163,22 +174,19 @@ pub async fn run() -> Result<()> {
         // Trigger on-demand summary generation for selected session
         if let Some(s) = app.selected_session() {
             let id = s.session_id.clone();
-            let has_summary = app.summaries.lock().unwrap().contains_key(&id);
-            let is_generating = generating.lock().unwrap().contains(&id);
+            let has_summary = app.summaries.lock().expect("summary mutex poisoned").contains_key(&id);
+            let is_generating = generating.lock().expect("generating mutex poisoned").contains(&id);
             if !has_summary && !is_generating {
                 let jsonl = s.jsonl_path.clone();
                 let summaries = app.summaries.clone();
                 app.summaries
                     .lock()
-                    .unwrap()
+                    .expect("summary mutex poisoned")
                     .insert(id.clone(), "Generating summary...".to_string());
                 spawn_summary_generation(id, jsonl, summaries, generating.clone());
             }
         }
     }
-
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     Ok(())
 }
 
@@ -188,7 +196,7 @@ fn spawn_summary_generation(
     summaries: Arc<Mutex<std::collections::HashMap<String, String>>>,
     generating: Arc<Mutex<std::collections::HashSet<String>>>,
 ) {
-    generating.lock().unwrap().insert(id.clone());
+    generating.lock().expect("generating mutex poisoned").insert(id.clone());
     tokio::spawn(async move {
         let path = std::path::Path::new(&jsonl);
         if let Ok(msgs) = crate::sessions::parse_messages(path) {
@@ -196,17 +204,17 @@ fn spawn_summary_generation(
                 Ok(text) => {
                     let out = crate::summary::summary_path(&id);
                     let _ = crate::summary::write_summary(&out, &text);
-                    summaries.lock().unwrap().insert(id.clone(), text);
+                    summaries.lock().expect("summary mutex poisoned").insert(id.clone(), text);
                 }
                 Err(e) => {
                     summaries
                         .lock()
-                        .unwrap()
+                        .expect("summary mutex poisoned")
                         .insert(id.clone(), format!("Error generating summary: {}", e));
                 }
             }
         }
-        generating.lock().unwrap().remove(&id);
+        generating.lock().expect("generating mutex poisoned").remove(&id);
     });
 }
 
@@ -292,7 +300,7 @@ fn draw_preview(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
             let summary = app
                 .summaries
                 .lock()
-                .unwrap()
+                .expect("summary mutex poisoned")
                 .get(&s.session_id)
                 .cloned()
                 .unwrap_or_else(|| "[hover to generate summary]".to_string());

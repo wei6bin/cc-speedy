@@ -4,7 +4,7 @@ use dirs::home_dir;
 use crate::sessions::Message;
 
 pub fn summaries_dir() -> PathBuf {
-    home_dir().unwrap().join(".claude").join("summaries")
+    home_dir().expect("HOME directory must be set").join(".claude").join("summaries")
 }
 
 pub fn summary_path(session_id: &str) -> PathBuf {

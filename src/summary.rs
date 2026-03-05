@@ -3,6 +3,9 @@ use std::path::{Path, PathBuf};
 use dirs::home_dir;
 use crate::sessions::Message;
 
+// Uses `claude -p` (Claude Code CLI) so no separate API key is needed —
+// authentication comes from your existing Claude subscription.
+
 pub fn summaries_dir() -> PathBuf {
     home_dir().expect("HOME directory must be set").join(".claude").join("summaries")
 }
@@ -24,9 +27,6 @@ pub fn write_summary(path: &Path, content: &str) -> Result<()> {
 }
 
 pub async fn generate_summary(messages: &[Message]) -> Result<String> {
-    let api_key = std::env::var("ANTHROPIC_API_KEY")
-        .map_err(|_| anyhow::anyhow!("ANTHROPIC_API_KEY not set"))?;
-
     // Take last 50 messages, format as conversation snippet
     let snippet: String = messages.iter().rev().take(50).rev()
         .map(|m| format!("{}: {}", m.role, m.text.chars().take(200).collect::<String>()))
@@ -42,26 +42,22 @@ pub async fn generate_summary(messages: &[Message]) -> Result<String> {
         snippet
     );
 
-    let client = reqwest::Client::new();
-    let resp = client
-        .post("https://api.anthropic.com/v1/messages")
-        .header("x-api-key", &api_key)
-        .header("anthropic-version", "2023-06-01")
-        .json(&serde_json::json!({
-            "model": "claude-haiku-4-5",
-            "max_tokens": 512,
-            "messages": [{"role": "user", "content": prompt}]
-        }))
-        .send()
-        .await?;
+    // Use `claude -p` (non-interactive) so no separate API key is needed
+    let output = tokio::process::Command::new("claude")
+        .args(["--print", &prompt])
+        .output()
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to run `claude`: {}", e))?;
 
-    let body: serde_json::Value = resp.json().await?;
-    let text = body["content"][0]["text"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("unexpected API response shape: {:?}", body))?
-        .to_string();
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("claude --print failed: {}", stderr);
+    }
 
-    Ok(text)
+    let text = String::from_utf8(output.stdout)
+        .map_err(|e| anyhow::anyhow!("claude output was not valid UTF-8: {}", e))?;
+
+    Ok(text.trim().to_string())
 }
 
 pub async fn run_hook() -> Result<()> {

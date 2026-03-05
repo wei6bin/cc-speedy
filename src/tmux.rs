@@ -33,21 +33,33 @@ pub fn resume_in_tmux(session_name: &str, project_path: &str, session_id: &str) 
     let claude_cmd = format!("claude --resume {}", session_id);
     if is_inside_tmux() {
         if session_exists(session_name) {
-            std::process::Command::new("tmux")
+            let status = std::process::Command::new("tmux")
                 .args(["switch-client", "-t", session_name])
                 .status()?;
+            if !status.success() {
+                anyhow::bail!("tmux command failed with status: {}", status);
+            }
         } else {
-            std::process::Command::new("tmux")
-                .args(["new-session", "-d", "-s", session_name, "-c", project_path, &claude_cmd])
+            let status = std::process::Command::new("tmux")
+                .args(["new-session", "-d", "-s", session_name, "-c", project_path, "sh", "-c", &claude_cmd])
                 .status()?;
-            std::process::Command::new("tmux")
+            if !status.success() {
+                anyhow::bail!("tmux command failed with status: {}", status);
+            }
+            let status = std::process::Command::new("tmux")
                 .args(["switch-client", "-t", session_name])
                 .status()?;
+            if !status.success() {
+                anyhow::bail!("tmux command failed with status: {}", status);
+            }
         }
     } else {
-        std::process::Command::new("tmux")
-            .args(["new-session", "-s", session_name, "-c", project_path, &claude_cmd])
+        let status = std::process::Command::new("tmux")
+            .args(["new-session", "-s", session_name, "-c", project_path, "sh", "-c", &claude_cmd])
             .status()?;
+        if !status.success() {
+            anyhow::bail!("tmux command failed with status: {}", status);
+        }
     }
     Ok(())
 }

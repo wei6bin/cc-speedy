@@ -200,7 +200,7 @@ fn spawn_summary_generation(
     tokio::spawn(async move {
         let path = std::path::Path::new(&jsonl);
         if let Ok(msgs) = crate::sessions::parse_messages(path) {
-            match crate::summary::generate_summary(&id, &msgs).await {
+            match crate::summary::generate_summary(&msgs).await {
                 Ok(text) => {
                     let out = crate::summary::summary_path(&id);
                     let _ = crate::summary::write_summary(&out, &text);

@@ -23,7 +23,7 @@ pub fn write_summary(path: &Path, content: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn generate_summary(session_id: &str, messages: &[Message]) -> Result<String> {
+pub async fn generate_summary(messages: &[Message]) -> Result<String> {
     let api_key = std::env::var("ANTHROPIC_API_KEY")
         .map_err(|_| anyhow::anyhow!("ANTHROPIC_API_KEY not set"))?;
 
@@ -42,15 +42,13 @@ pub async fn generate_summary(session_id: &str, messages: &[Message]) -> Result<
         snippet
     );
 
-    let _ = session_id; // used for context, not needed in API call
-
     let client = reqwest::Client::new();
     let resp = client
         .post("https://api.anthropic.com/v1/messages")
         .header("x-api-key", &api_key)
         .header("anthropic-version", "2023-06-01")
         .json(&serde_json::json!({
-            "model": "claude-haiku-4-5-20251001",
+            "model": "claude-haiku-4-5",
             "max_tokens": 512,
             "messages": [{"role": "user", "content": prompt}]
         }))
@@ -89,7 +87,7 @@ pub async fn run_hook() -> Result<()> {
     };
 
     let messages = crate::sessions::parse_messages(std::path::Path::new(&jsonl_path))?;
-    let summary = generate_summary(&session_id, &messages).await?;
+    let summary = generate_summary(&messages).await?;
     write_summary(&out_path, &summary)?;
     eprintln!("cc-speedy: summary written to {:?}", out_path);
     Ok(())

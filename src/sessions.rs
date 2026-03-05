@@ -110,6 +110,10 @@ pub fn list_sessions() -> Result<Vec<Session>> {
     Ok(sessions)
 }
 
+/// Convert Claude Code project dir name (e.g. "-home-weibin-repo-ai-foo") to an absolute path.
+/// NOTE: This translation is ambiguous — a `-` in the dir name could be either a path separator
+/// or an original hyphen in a directory name. For projects with hyphens in path components,
+/// the reconstructed path may be incorrect.
 pub fn dir_name_to_abs_path(dir_name: &str) -> String {
     let replaced = dir_name.replace('-', "/");
     let trimmed = replaced.trim_start_matches('/');

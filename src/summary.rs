@@ -95,10 +95,10 @@ pub async fn run_hook() -> Result<()> {
     Ok(())
 }
 
-fn find_jsonl(session_id: &str) -> Option<String> {
+pub fn find_jsonl(session_id: &str) -> Option<String> {
     let base = home_dir()?.join(".claude").join("projects");
     for proj in std::fs::read_dir(&base).ok()? {
-        let proj = proj.ok()?;
+        let Ok(proj) = proj else { continue; };
         let candidate = proj.path().join(format!("{}.jsonl", session_id));
         if candidate.exists() {
             return Some(candidate.to_string_lossy().to_string());

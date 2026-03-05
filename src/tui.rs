@@ -191,7 +191,8 @@ async fn run_event_loop(
                         }
                     }
 
-                    (KeyModifiers::CONTROL, KeyCode::Enter) if !app.filter_mode => {
+                    // Ctrl+Enter unreliable in WSL — use Ctrl+Y (yolo) instead
+                    (KeyModifiers::CONTROL, KeyCode::Char('y')) if !app.filter_mode => {
                         if let Some(s) = app.selected_session() {
                             let name = crate::tmux::session_name_from_path(&s.project_path);
                             let path = s.project_path.clone();
@@ -328,7 +329,7 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
 
     // Status bar
     let status = Paragraph::new(
-        " Enter: resume  Ctrl+Enter: yolo  Tab: focus preview  j/k: navigate/scroll  /: filter  r: regenerate  q: quit",
+        " Enter: resume  Ctrl+Y: yolo  Tab: focus preview  j/k: navigate/scroll  /: filter  r: regenerate  q: quit",
     )
     .style(Style::default().fg(Color::DarkGray));
     f.render_widget(status, chunks[3]);

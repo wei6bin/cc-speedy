@@ -51,7 +51,7 @@ cc-speedy           # open session browser TUI
 | `/` | Enter filter mode |
 | `Esc` | Clear filter / exit filter mode |
 | `Enter` | Resume session in tmux |
-| `Ctrl+Enter` | Resume session in yolo mode (`--dangerously-skip-permissions`) |
+| `Ctrl+Y` | Resume session in yolo mode (`--dangerously-skip-permissions`) |
 | `r` | Regenerate summary for selected session |
 | `q` / `Ctrl-C` | Quit |
 

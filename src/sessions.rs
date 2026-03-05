@@ -51,7 +51,7 @@ fn extract_text(content: &Value) -> String {
 
 pub fn list_sessions() -> Result<Vec<Session>> {
     let claude_dir = dirs::home_dir()
-        .unwrap()
+        .ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?
         .join(".claude")
         .join("projects");
 
@@ -73,12 +73,14 @@ pub fn list_sessions() -> Result<Vec<Session>> {
             let msgs = parse_messages(&file_path).unwrap_or_default();
             if msgs.len() < 4 { continue; }
 
-            let first_user_msg: String = msgs.iter()
+            let first_user_text = msgs.iter()
                 .find(|m| m.role == "user")
-                .map(|m| m.text.chars().take(80).collect())
+                .map(|m| m.text.as_str())
                 .unwrap_or_default();
 
-            if first_user_msg.contains("local-command-caveat") && msgs.len() < 10 { continue; }
+            if first_user_text.contains("local-command-caveat") && msgs.len() < 10 { continue; }
+
+            let first_user_msg: String = first_user_text.chars().take(80).collect();
 
             let session_id = file_path.file_stem()
                 .and_then(|s| s.to_str())

@@ -1,7 +1,5 @@
-mod tui;
-
 use anyhow::Result;
-use cc_speedy::{summary, install};
+use cc_speedy::{summary, install, tui};
 
 #[tokio::main]
 async fn main() -> Result<()> {

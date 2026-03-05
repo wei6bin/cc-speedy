@@ -1,0 +1,4 @@
+{"type":"user","message":{"content":[{"type":"text","text":"fix the bug in auth"}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Sure, let me look..."}]}}
+{"type":"user","message":{"content":[{"type":"text","text":"great thanks"}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Done! Fixed."}]}}

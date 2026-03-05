@@ -17,6 +17,9 @@ use std::sync::{Arc, Mutex};
 use crate::sessions::{list_sessions, Session};
 use crate::summary::{read_summary, summary_path};
 
+#[derive(PartialEq)]
+enum Focus { List, Preview }
+
 struct AppState {
     sessions: Vec<Session>,
     filtered: Vec<usize>,
@@ -25,6 +28,8 @@ struct AppState {
     filter_mode: bool,
     summaries: Arc<Mutex<std::collections::HashMap<String, String>>>,
     generating: Arc<Mutex<std::collections::HashSet<String>>>,
+    focus: Focus,
+    preview_scroll: u16,
 }
 
 impl AppState {
@@ -42,6 +47,8 @@ impl AppState {
             filter_mode: false,
             summaries: Arc::new(Mutex::new(std::collections::HashMap::new())),
             generating: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            focus: Focus::List,
+            preview_scroll: 0,
         }
     }
 
@@ -135,16 +142,32 @@ async fn run_event_loop(
                         app.apply_filter();
                     }
 
+                    (_, KeyCode::Tab) if !app.filter_mode => {
+                        app.focus = if app.focus == Focus::List { Focus::Preview } else { Focus::List };
+                    }
+
                     (_, KeyCode::Down) | (_, KeyCode::Char('j')) if !app.filter_mode => {
-                        let n = app.filtered.len();
-                        if n > 0 {
-                            let i = app.list_state.selected().unwrap_or(0);
-                            app.list_state.select(Some((i + 1).min(n - 1)));
+                        if app.focus == Focus::Preview {
+                            app.preview_scroll = app.preview_scroll.saturating_add(1);
+                        } else {
+                            let n = app.filtered.len();
+                            if n > 0 {
+                                let i = app.list_state.selected().unwrap_or(0);
+                                let next = (i + 1).min(n - 1);
+                                if next != i { app.preview_scroll = 0; }
+                                app.list_state.select(Some(next));
+                            }
                         }
                     }
                     (_, KeyCode::Up) | (_, KeyCode::Char('k')) if !app.filter_mode => {
-                        let i = app.list_state.selected().unwrap_or(0);
-                        app.list_state.select(Some(i.saturating_sub(1)));
+                        if app.focus == Focus::Preview {
+                            app.preview_scroll = app.preview_scroll.saturating_sub(1);
+                        } else {
+                            let i = app.list_state.selected().unwrap_or(0);
+                            let prev = i.saturating_sub(1);
+                            if prev != i { app.preview_scroll = 0; }
+                            app.list_state.select(Some(prev));
+                        }
                     }
 
                     (_, KeyCode::Char('r')) if !app.filter_mode => {
@@ -164,8 +187,16 @@ async fn run_event_loop(
                             let name = crate::tmux::session_name_from_path(&s.project_path);
                             let path = s.project_path.clone();
                             let id = s.session_id.clone();
-                            // Note: terminal cleanup happens in run() after this returns
-                            return crate::tmux::resume_in_tmux(&name, &path, &id);
+                            return crate::tmux::resume_in_tmux(&name, &path, &id, false);
+                        }
+                    }
+
+                    (KeyModifiers::CONTROL, KeyCode::Enter) if !app.filter_mode => {
+                        if let Some(s) = app.selected_session() {
+                            let name = crate::tmux::session_name_from_path(&s.project_path);
+                            let path = s.project_path.clone();
+                            let id = s.session_id.clone();
+                            return crate::tmux::resume_in_tmux(&name, &path, &id, true);
                         }
                     }
 
@@ -175,12 +206,16 @@ async fn run_event_loop(
         }
 
         // Auto-trigger summary for small sessions (≤20 msgs); larger sessions require manual `r`
+        // Throttle: max 5 concurrent background processes (no queue — drop if at limit)
         if let Some(s) = app.selected_session() {
             if s.message_count <= 20 {
                 let id = s.session_id.clone();
-                let has_summary = app.summaries.lock().expect("summary mutex poisoned").contains_key(&id);
-                let is_generating = app.generating.lock().expect("generating mutex poisoned").contains(&id);
-                if !has_summary && !is_generating {
+                let (has_summary, is_generating, active_count) = {
+                    let sum = app.summaries.lock().expect("summary mutex poisoned");
+                    let gen = app.generating.lock().expect("generating mutex poisoned");
+                    (sum.contains_key(&id), gen.contains(&id), gen.len())
+                };
+                if !has_summary && !is_generating && active_count < 5 {
                     let jsonl = s.jsonl_path.clone();
                     let summaries = app.summaries.clone();
                     let generating = app.generating.clone();
@@ -278,7 +313,7 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
         .split(chunks[1]);
 
     draw_list(f, app, panes[0]);
-    draw_preview(f, app, panes[1]);
+    draw_preview(f, app, panes[1], app.preview_scroll);
 
     // Background jobs panel
     if jobs_height > 0 {
@@ -293,7 +328,7 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
 
     // Status bar
     let status = Paragraph::new(
-        " Enter: resume  j/k: navigate  /: filter  Esc: clear filter  r: regenerate  q: quit",
+        " Enter: resume  Ctrl+Enter: yolo  Tab: focus preview  j/k: navigate/scroll  /: filter  r: regenerate  q: quit",
     )
     .style(Style::default().fg(Color::DarkGray));
     f.render_widget(status, chunks[3]);
@@ -338,7 +373,7 @@ fn draw_list(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
     f.render_stateful_widget(list, area, &mut app.list_state);
 }
 
-fn draw_preview(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
+fn draw_preview(f: &mut ratatui::Frame, app: &mut AppState, area: Rect, scroll: u16) {
     let content = match app.selected_session() {
         None => "No session selected".to_string(),
         Some(s) => {
@@ -388,9 +423,15 @@ fn draw_preview(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
         }
     };
 
+    let focused = app.focus == Focus::Preview;
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(if focused { " Summary  [Tab: back to list] " } else { " Summary  [Tab: scroll] " })
+        .border_style(if focused { Style::default().fg(Color::Cyan) } else { Style::default() });
     let preview = Paragraph::new(content)
-        .block(Block::default().borders(Borders::ALL).title(" Summary "))
-        .wrap(Wrap { trim: false });
+        .block(block)
+        .wrap(Wrap { trim: false })
+        .scroll((scroll, 0));
     f.render_widget(preview, area);
 }
 

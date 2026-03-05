@@ -29,14 +29,16 @@ pub fn session_exists(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-pub fn resume_in_tmux(session_name: &str, project_path: &str, session_id: &str) -> Result<()> {
+pub fn resume_in_tmux(session_name: &str, project_path: &str, session_id: &str, yolo: bool) -> Result<()> {
     // Pass claude args directly — never via "sh -c" to avoid shell injection
     let new_session = |detach: bool| -> Result<()> {
         let mut cmd = std::process::Command::new("tmux");
         cmd.arg("new-session");
         if detach { cmd.arg("-d"); }
-        cmd.args(["-s", session_name, "-c", project_path,
-                  "claude", "--resume", session_id]);
+        let mut args: Vec<&str> = vec!["-s", session_name, "-c", project_path,
+                                       "claude", "--resume", session_id];
+        if yolo { args.push("--dangerously-skip-permissions"); }
+        cmd.args(&args);
         let status = cmd.status()?;
         if !status.success() {
             anyhow::bail!("tmux new-session failed: {}", status);

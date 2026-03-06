@@ -20,12 +20,16 @@ use crate::summary::{read_summary, summary_path};
 #[derive(PartialEq)]
 enum Focus { List, Preview }
 
+#[derive(PartialEq)]
+enum AppMode { Normal, Filter, Rename }
+
 struct AppState {
     sessions: Vec<Session>,
     filtered: Vec<usize>,
     list_state: ListState,
     filter: String,
-    filter_mode: bool,
+    mode: AppMode,
+    rename_input: String,
     summaries: Arc<Mutex<std::collections::HashMap<String, String>>>,
     generating: Arc<Mutex<std::collections::HashSet<String>>>,
     focus: Focus,
@@ -44,7 +48,8 @@ impl AppState {
             sessions,
             list_state,
             filter: String::new(),
-            filter_mode: false,
+            mode: AppMode::Normal,
+            rename_input: String::new(),
             summaries: Arc::new(Mutex::new(std::collections::HashMap::new())),
             generating: Arc::new(Mutex::new(std::collections::HashSet::new())),
             focus: Focus::List,
@@ -121,32 +126,70 @@ async fn run_event_loop(
 
         if event::poll(std::time::Duration::from_millis(200))? {
             if let Event::Key(key) = event::read()? {
-                match (key.modifiers, key.code) {
-                    (_, KeyCode::Char('q')) if !app.filter_mode => break,
-                    (KeyModifiers::CONTROL, KeyCode::Char('c')) => break,
+                match (&app.mode, key.modifiers, key.code) {
+                    // --- Global ---
+                    (_, KeyModifiers::CONTROL, KeyCode::Char('c')) => break,
+                    (AppMode::Normal, _, KeyCode::Char('q')) => break,
 
-                    (_, KeyCode::Char('/')) if !app.filter_mode => {
-                        app.filter_mode = true;
+                    // --- Filter mode ---
+                    (AppMode::Normal, _, KeyCode::Char('/')) => {
+                        app.mode = AppMode::Filter;
                     }
-                    (_, KeyCode::Esc) if app.filter_mode => {
-                        app.filter_mode = false;
+                    (AppMode::Filter, _, KeyCode::Esc) => {
+                        app.mode = AppMode::Normal;
                         app.filter.clear();
                         app.apply_filter();
                     }
-                    (_, KeyCode::Backspace) if app.filter_mode => {
+                    (AppMode::Filter, _, KeyCode::Backspace) => {
                         app.filter.pop();
                         app.apply_filter();
                     }
-                    (_, KeyCode::Char(c)) if app.filter_mode => {
+                    (AppMode::Filter, _, KeyCode::Char(c)) => {
                         app.filter.push(c);
                         app.apply_filter();
                     }
 
-                    (_, KeyCode::Tab) if !app.filter_mode => {
+                    // --- Rename mode ---
+                    (AppMode::Normal, KeyModifiers::NONE, KeyCode::Char('r')) => {
+                        if let Some(s) = app.selected_session() {
+                            app.rename_input = s.summary.clone();
+                            app.mode = AppMode::Rename;
+                        }
+                    }
+                    (AppMode::Rename, _, KeyCode::Esc) => {
+                        app.mode = AppMode::Normal;
+                        app.rename_input.clear();
+                    }
+                    (AppMode::Rename, _, KeyCode::Backspace) => {
+                        app.rename_input.pop();
+                    }
+                    (AppMode::Rename, _, KeyCode::Enter) => {
+                        let title = app.rename_input.trim().to_string();
+                        if !title.is_empty() {
+                            if let Some(s) = app.selected_session() {
+                                let id = s.session_id.clone();
+                                let _ = crate::sessions::write_rename(&id, &title);
+                                // Update in-memory immediately
+                                if let Some(s) = app.filtered.get(
+                                    app.list_state.selected().unwrap_or(0)
+                                ).and_then(|&i| app.sessions.get_mut(i)) {
+                                    s.summary = title;
+                                }
+                            }
+                        }
+                        app.mode = AppMode::Normal;
+                        app.rename_input.clear();
+                    }
+                    (AppMode::Rename, _, KeyCode::Char(c)) => {
+                        app.rename_input.push(c);
+                    }
+
+                    // --- Normal navigation ---
+                    (AppMode::Normal, _, KeyCode::Tab) => {
                         app.focus = if app.focus == Focus::List { Focus::Preview } else { Focus::List };
                     }
 
-                    (_, KeyCode::Down) | (_, KeyCode::Char('j')) if !app.filter_mode => {
+                    (AppMode::Normal, _, KeyCode::Down) | (AppMode::Normal, _, KeyCode::Char('j')) => {
                         if app.focus == Focus::Preview {
                             app.preview_scroll = app.preview_scroll.saturating_add(1);
                         } else {
@@ -159,7 +202,7 @@ async fn run_event_loop(
                             }
                         }
                     }
-                    (_, KeyCode::Up) | (_, KeyCode::Char('k')) if !app.filter_mode => {
+                    (AppMode::Normal, _, KeyCode::Up) | (AppMode::Normal, _, KeyCode::Char('k')) => {
                         if app.focus == Focus::Preview {
                             app.preview_scroll = app.preview_scroll.saturating_sub(1);
                         } else {
@@ -170,7 +213,8 @@ async fn run_event_loop(
                         }
                     }
 
-                    (_, KeyCode::Char('r')) if !app.filter_mode => {
+                    // Ctrl+R: regenerate summary
+                    (AppMode::Normal, KeyModifiers::CONTROL, KeyCode::Char('r')) => {
                         if let Some(s) = app.selected_session() {
                             let id = s.session_id.clone();
                             let jsonl = s.jsonl_path.clone();
@@ -182,7 +226,7 @@ async fn run_event_loop(
                         }
                     }
 
-                    (_, KeyCode::Enter) if !app.filter_mode => {
+                    (AppMode::Normal, _, KeyCode::Enter) => {
                         if let Some(s) = app.selected_session() {
                             let name = crate::tmux::session_name_from_path(&s.project_path);
                             let path = s.project_path.clone();
@@ -192,8 +236,8 @@ async fn run_event_loop(
                         }
                     }
 
-                    // Ctrl+Enter unreliable in WSL — use Ctrl+Y (yolo) instead
-                    (KeyModifiers::CONTROL, KeyCode::Char('y')) if !app.filter_mode => {
+                    // Ctrl+Y: yolo mode
+                    (AppMode::Normal, KeyModifiers::CONTROL, KeyCode::Char('y')) => {
                         if let Some(s) = app.selected_session() {
                             let name = crate::tmux::session_name_from_path(&s.project_path);
                             let path = s.project_path.clone();
@@ -208,7 +252,7 @@ async fn run_event_loop(
             }
         }
 
-        // Auto-trigger summary for small sessions (≤20 msgs); larger sessions require manual `r`
+        // Auto-trigger summary for small sessions (≤20 msgs); larger sessions require manual Ctrl+R
         // Throttle: max 5 concurrent background processes (no queue — drop if at limit)
         if let Some(s) = app.selected_session() {
             if s.message_count <= 20 {
@@ -297,16 +341,21 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
         ])
         .split(area);
 
-    // Filter bar
-    let filter_display = if app.filter_mode {
-        format!("> {}|", app.filter)
-    } else if app.filter.is_empty() {
-        "  (press / to filter)".to_string()
-    } else {
-        format!("  filter: {}", app.filter)
+    // Top bar: filter / rename input / idle hint
+    let (bar_text, bar_title) = match &app.mode {
+        AppMode::Filter => (format!("> {}|", app.filter), " Filter "),
+        AppMode::Rename => (format!("rename: {}|", app.rename_input), " Rename  [Enter: confirm  Esc: cancel] "),
+        AppMode::Normal => {
+            let hint = if app.filter.is_empty() {
+                "  (press / to filter)".to_string()
+            } else {
+                format!("  filter: {}", app.filter)
+            };
+            (hint, " cc-speedy ")
+        }
     };
-    let filter_block = Paragraph::new(filter_display)
-        .block(Block::default().borders(Borders::ALL).title(" cc-speedy "));
+    let filter_block = Paragraph::new(bar_text)
+        .block(Block::default().borders(Borders::ALL).title(bar_title));
     f.render_widget(filter_block, chunks[0]);
 
     // Main panes
@@ -331,7 +380,7 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
 
     // Status bar
     let status = Paragraph::new(
-        " Enter: resume  Ctrl+Y: yolo  Tab: focus preview  j/k: navigate/scroll  /: filter  r: regenerate  q: quit",
+        " Enter: resume  Ctrl+Y: yolo  Tab: preview  j/k: nav  /: filter  r: rename  Ctrl+R: regenerate  q: quit",
     )
     .style(Style::default().fg(Color::DarkGray));
     f.render_widget(status, chunks[3]);
@@ -345,13 +394,15 @@ fn draw_list(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
             let s = &app.sessions[i];
             let dt = format_time(s.modified);
             let folder = path_last_n(&s.project_path, 3);
+            let label = if s.summary.is_empty() {
+                truncate(&format!("[{}]", s.project_name), 21)
+            } else {
+                truncate(&s.summary, 21)
+            };
             let line = Line::from(vec![
                 Span::styled(format!("{} ", dt), Style::default().fg(Color::DarkGray)),
-                Span::raw(format!("{:<28}", if s.summary.is_empty() {
-                    truncate(&format!("[{}]", s.project_name), 27)
-                } else {
-                    truncate(&s.summary, 27)
-                })),
+                Span::raw(format!("{:<22}", label)),
+                Span::styled(format!("{:>4} ", s.message_count), Style::default().fg(Color::DarkGray)),
                 Span::styled(folder, Style::default().fg(Color::DarkGray)),
             ]);
             ListItem::new(line)

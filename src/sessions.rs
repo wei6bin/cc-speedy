@@ -165,6 +165,26 @@ pub fn read_rename_history() -> std::collections::HashMap<String, String> {
     map
 }
 
+/// Append a /rename entry to ~/.claude/history.jsonl so Claude Code picks it up.
+pub fn write_rename(session_id: &str, title: &str) -> anyhow::Result<()> {
+    let path = dirs::home_dir()
+        .ok_or_else(|| anyhow::anyhow!("no home dir"))?
+        .join(".claude")
+        .join("history.jsonl");
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_millis() as u64;
+    let entry = serde_json::json!({
+        "display": format!("/rename {}", title),
+        "sessionId": session_id,
+        "timestamp": ts,
+    });
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new().append(true).create(true).open(&path)?;
+    writeln!(file, "{}", entry)?;
+    Ok(())
+}
+
 fn read_sessions_index(proj_path: &Path) -> Option<SessionIndex> {
     let content = std::fs::read_to_string(proj_path.join("sessions-index.json")).ok()?;
     serde_json::from_str::<SessionIndex>(&content).ok()

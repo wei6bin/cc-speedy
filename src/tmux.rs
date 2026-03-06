@@ -88,11 +88,12 @@ pub fn resume_in_tmux(session_name: &str, project_path: &str, session_id: &str, 
             pin_window_title(session_name);
         }
     } else {
-        // new_session(false) attaches and blocks — set title before attaching via -n flag
-        // pin automatic-rename off before attaching so it survives process start
-        new_session(true)?; // create detached first
+        // Outside tmux: create detached first so we can pin the title, then attach.
+        // If the session already exists (leftover from a previous run), just attach.
+        if !session_exists(session_name) {
+            new_session(true)?;
+        }
         pin_window_title(session_name);
-        // now attach
         let status = std::process::Command::new("tmux")
             .args(["attach-session", "-t", session_name])
             .status()?;

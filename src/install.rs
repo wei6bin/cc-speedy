@@ -19,7 +19,9 @@ pub fn install_to(settings_path: &Path, binary_path: &str) -> Result<()> {
     let content = std::fs::read_to_string(settings_path).unwrap_or_else(|_| "{}".to_string());
     let mut settings: Value = serde_json::from_str(&content)?;
 
-    let hook_cmd = format!("{} summarize", binary_path);
+    // Build the entry first so the idempotency check uses the exact same command string
+    let entry = build_hook_entry(binary_path);
+    let hook_cmd = entry["hooks"][0]["command"].as_str().unwrap_or("").to_string();
 
     // Check if already installed — idempotent
     if let Some(existing) = settings["hooks"]["SessionEnd"].as_array() {
@@ -34,8 +36,6 @@ pub fn install_to(settings_path: &Path, binary_path: &str) -> Result<()> {
             }
         }
     }
-
-    let entry = build_hook_entry(binary_path);
 
     // Append to existing SessionEnd array or create it
     if let Some(arr) = settings["hooks"]["SessionEnd"].as_array_mut() {

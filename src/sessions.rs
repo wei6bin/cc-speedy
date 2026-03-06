@@ -226,13 +226,14 @@ pub fn list_sessions() -> Result<Vec<Session>> {
         }
 
         // Fallback path: existing jsonl parsing logic
-        for file_entry in std::fs::read_dir(&proj_path)? {
-            let file_entry = file_entry?;
+        let Ok(dir_iter) = std::fs::read_dir(&proj_path) else { continue; };
+        for file_entry in dir_iter {
+            let Ok(file_entry) = file_entry else { continue; };
             let file_path = file_entry.path();
             if file_path.extension().and_then(|e| e.to_str()) != Some("jsonl") { continue; }
 
-            let metadata = file_path.metadata()?;
-            let modified = metadata.modified()?;
+            let Ok(metadata) = file_path.metadata() else { continue; };
+            let Ok(modified) = metadata.modified() else { continue; };
 
             let msgs = parse_messages(&file_path).unwrap_or_default();
             if msgs.len() < 4 { continue; }

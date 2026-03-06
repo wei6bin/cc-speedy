@@ -38,7 +38,7 @@ fn test_install_is_idempotent() {
             "SessionEnd": [{
                 "hooks": [{
                     "type": "command",
-                    "command": "/bin/cc-speedy summarize"
+                    "command": "\"/bin/cc-speedy\" summarize"
                 }]
             }]
         }

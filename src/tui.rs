@@ -90,14 +90,14 @@ pub async fn run() -> Result<()> {
 
     let mut app = AppState::new(sessions);
 
-    // Pre-load existing summaries from disk
-    for session in &app.sessions {
-        let path = summary_path(&session.session_id);
-        if let Some(content) = read_summary(&path) {
-            app.summaries
-                .lock()
-                .expect("summary mutex poisoned")
-                .insert(session.session_id.clone(), content);
+    // Pre-load existing summaries from disk (single lock acquisition)
+    {
+        let mut summaries = app.summaries.lock().expect("summary mutex poisoned");
+        for session in &app.sessions {
+            let path = summary_path(&session.session_id);
+            if let Some(content) = read_summary(&path) {
+                summaries.insert(session.session_id.clone(), content);
+            }
         }
     }
 
@@ -187,7 +187,8 @@ async fn run_event_loop(
                             let name = crate::tmux::session_name_from_path(&s.project_path);
                             let path = s.project_path.clone();
                             let id = s.session_id.clone();
-                            return crate::tmux::resume_in_tmux(&name, &path, &id, false);
+                            let title = window_title_from_session(s);
+                            return crate::tmux::resume_in_tmux(&name, &path, &id, false, &title);
                         }
                     }
 
@@ -197,7 +198,8 @@ async fn run_event_loop(
                             let name = crate::tmux::session_name_from_path(&s.project_path);
                             let path = s.project_path.clone();
                             let id = s.session_id.clone();
-                            return crate::tmux::resume_in_tmux(&name, &path, &id, true);
+                            let title = window_title_from_session(s);
+                            return crate::tmux::resume_in_tmux(&name, &path, &id, true, &title);
                         }
                     }
 
@@ -464,4 +466,9 @@ fn truncate(s: &str, max: usize) -> String {
     } else {
         format!("{}…", s.chars().take(max - 1).collect::<String>())
     }
+}
+
+fn window_title_from_session(s: &Session) -> String {
+    let label = if !s.summary.is_empty() { &s.summary } else { &s.project_name };
+    truncate(label, 10)
 }

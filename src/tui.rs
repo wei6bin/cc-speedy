@@ -14,6 +14,7 @@ use ratatui::{
 };
 use std::io::stdout;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use crate::sessions::{list_sessions, Session};
 use crate::summary::{read_summary, summary_path};
 
@@ -34,6 +35,7 @@ struct AppState {
     generating: Arc<Mutex<std::collections::HashSet<String>>>,
     focus: Focus,
     preview_scroll: u16,
+    status_msg: Option<(String, Instant)>,
 }
 
 impl AppState {
@@ -54,6 +56,7 @@ impl AppState {
             generating: Arc::new(Mutex::new(std::collections::HashSet::new())),
             focus: Focus::List,
             preview_scroll: 0,
+            status_msg: None,
         }
     }
 
@@ -247,31 +250,22 @@ async fn run_event_loop(
                         }
                     }
 
+                    // c: copy summary to clipboard
+                    (AppMode::Normal, KeyModifiers::NONE, KeyCode::Char('c')) => {
+                        let content = build_preview_content(app);
+                        let msg = match copy_to_clipboard(&content) {
+                            Ok(_)  => "Copied to clipboard".to_string(),
+                            Err(e) => format!("Copy failed: {}", e),
+                        };
+                        app.status_msg = Some((msg, Instant::now()));
+                    }
+
                     _ => {}
                 }
             }
         }
 
-        // Auto-trigger summary for small sessions (≤20 msgs); larger sessions require manual Ctrl+R
-        // Throttle: max 5 concurrent background processes (no queue — drop if at limit)
-        if let Some(s) = app.selected_session() {
-            if s.message_count <= 20 {
-                let id = s.session_id.clone();
-                let (has_summary, is_generating, active_count) = {
-                    let sum = app.summaries.lock().expect("summary mutex poisoned");
-                    let gen = app.generating.lock().expect("generating mutex poisoned");
-                    (sum.contains_key(&id), gen.contains(&id), gen.len())
-                };
-                if !has_summary && !is_generating && active_count < 5 {
-                    let jsonl = s.jsonl_path.clone();
-                    let summaries = app.summaries.clone();
-                    let generating = app.generating.clone();
-                    app.summaries.lock().expect("summary mutex poisoned")
-                        .insert(id.clone(), "Generating summary...".to_string());
-                    spawn_summary_generation(id, jsonl, summaries, generating);
-                }
-            }
-        }
+        // Summary generation is manual only — use Ctrl+R to generate for selected session
     }
     Ok(())
 }
@@ -378,12 +372,19 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
         f.render_widget(jobs_panel, chunks[2]);
     }
 
-    // Status bar
-    let status = Paragraph::new(
-        " Enter: resume  Ctrl+Y: yolo  Tab: preview  j/k: nav  /: filter  r: rename  Ctrl+R: regenerate  q: quit",
-    )
-    .style(Style::default().fg(Color::DarkGray));
-    f.render_widget(status, chunks[3]);
+    // Status bar: show timed flash message, or the key hint
+    let (status_text, status_style) = if let Some((msg, at)) = &app.status_msg {
+        if at.elapsed().as_secs() < 2 {
+            (msg.as_str(), Style::default().fg(Color::Green))
+        } else {
+            (" Enter: resume  Ctrl+Y: yolo  Tab: preview  j/k: nav  /: filter  r: rename  c: copy  Ctrl+R: regen  q: quit",
+             Style::default().fg(Color::DarkGray))
+        }
+    } else {
+        (" Enter: resume  Ctrl+Y: yolo  Tab: preview  j/k: nav  /: filter  r: rename  c: copy  Ctrl+R: regen  q: quit",
+         Style::default().fg(Color::DarkGray))
+    };
+    f.render_widget(Paragraph::new(status_text).style(status_style), chunks[3]);
 }
 
 fn draw_list(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
@@ -427,8 +428,8 @@ fn draw_list(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
     f.render_stateful_widget(list, area, &mut app.list_state);
 }
 
-fn draw_preview(f: &mut ratatui::Frame, app: &mut AppState, area: Rect, scroll: u16) {
-    let content = match app.selected_session() {
+fn build_preview_content(app: &AppState) -> String {
+    match app.selected_session() {
         None => "No session selected".to_string(),
         Some(s) => {
             let fallback = if !s.summary.is_empty() {
@@ -475,7 +476,11 @@ fn draw_preview(f: &mut ratatui::Frame, app: &mut AppState, area: Rect, scroll: 
                 generated_line,
             )
         }
-    };
+    }
+}
+
+fn draw_preview(f: &mut ratatui::Frame, app: &mut AppState, area: Rect, scroll: u16) {
+    let content = build_preview_content(app);
 
     let focused = app.focus == Focus::Preview;
     let block = Block::default()
@@ -522,4 +527,37 @@ fn truncate(s: &str, max: usize) -> String {
 fn window_title_from_session(s: &Session) -> String {
     let label = if !s.summary.is_empty() { &s.summary } else { &s.project_name };
     truncate(label, 10)
+}
+
+/// Copy text to the system clipboard.
+/// Tries clip.exe (WSL), xclip, xsel, pbcopy in order.
+fn copy_to_clipboard(text: &str) -> anyhow::Result<()> {
+    let candidates: &[(&str, &[&str])] = &[
+        ("clip.exe",  &[]),
+        ("xclip",     &["-selection", "clipboard"]),
+        ("xsel",      &["--clipboard", "--input"]),
+        ("pbcopy",    &[]),
+    ];
+    for (cmd, args) in candidates {
+        let mut child = match std::process::Command::new(cmd)
+            .args(*args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        if let Some(stdin) = child.stdin.take() {
+            use std::io::Write;
+            let mut stdin = stdin;
+            let _ = stdin.write_all(text.as_bytes());
+        }
+        let status = child.wait()?;
+        if status.success() {
+            return Ok(());
+        }
+    }
+    anyhow::bail!("no clipboard tool found (tried clip.exe, xclip, xsel, pbcopy)")
 }

@@ -50,7 +50,16 @@ pub fn parse_opencode_messages_from_conn(conn: &Connection, session_id: &str) ->
                 row.get::<_, String>(1)?,
             ))
         })?
-        .filter_map(|r| r.ok())
+        .filter_map(|r| {
+            match r {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    #[cfg(debug_assertions)]
+                    eprintln!("cc-speedy: skipping malformed part row: {}", e);
+                    None
+                }
+            }
+        })
         .collect();
 
     let mut messages = Vec::with_capacity(rows.len());
@@ -107,7 +116,16 @@ pub fn query_sessions_from_conn(conn: &Connection) -> Result<Vec<UnifiedSession>
                 row.get::<_, usize>(4)?,
             ))
         })?
-        .filter_map(|r| r.ok())
+        .filter_map(|r| {
+            match r {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    #[cfg(debug_assertions)]
+                    eprintln!("cc-speedy: skipping malformed session row: {}", e);
+                    None
+                }
+            }
+        })
         .collect();
 
     let mut sessions = Vec::with_capacity(rows.len());
@@ -121,7 +139,7 @@ pub fn query_sessions_from_conn(conn: &Connection) -> Result<Vec<UnifiedSession>
         let modified = UNIX_EPOCH
             + Duration::from_millis(time_updated_ms.max(0) as u64);
 
-        let project_name = path_last_two(&worktree);
+        let project_name = crate::util::path_last_n(&worktree, 2);
 
         sessions.push(UnifiedSession {
             session_id:    id,
@@ -148,6 +166,7 @@ fn query_first_user_text(conn: &Connection, session_id: &str) -> Option<String> 
          FROM part p
          JOIN message m ON m.id = p.message_id
          WHERE m.session_id = ?1
+           AND json_extract(m.data, '$.role') = 'user'
            AND p.data LIKE '{\"type\":\"text\"%'
          ORDER BY p.time_created ASC
          LIMIT 1",
@@ -160,17 +179,6 @@ fn query_first_user_text(conn: &Connection, session_id: &str) -> Option<String> 
     v["text"].as_str().map(|s| s.to_string())
 }
 
-/// Return the last two path segments joined with "/", e.g. "/home/user/ai/proj" → "ai/proj".
-fn path_last_two(path: &str) -> String {
-    let parts: Vec<&str> = path.trim_end_matches('/')
-        .split('/')
-        .filter(|s| !s.is_empty())
-        .collect();
-    match parts.len() {
-        0 => path.to_string(),
-        1 => parts[0].to_string(),
-        n => parts[n - 2..].join("/"),
-    }
-}
+
 
 

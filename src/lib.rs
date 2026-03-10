@@ -5,3 +5,4 @@ pub mod install;
 pub mod tui;
 pub mod unified;
 pub mod opencode_sessions;
+pub mod util;

@@ -57,7 +57,7 @@ pub fn parse_messages(path: &Path) -> Result<Vec<Message>> {
     let content = std::fs::read_to_string(path)?;
     let mut msgs = Vec::new();
     for line in content.lines() {
-        let Ok(v): Result<Value, _> = serde_json::from_str(line) else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
         let role = v["type"].as_str().unwrap_or("").to_string();
         if role != "user" && role != "assistant" { continue; }
         let text = extract_text(&v["message"]["content"]);
@@ -75,8 +75,8 @@ pub fn read_cwd_from_jsonl(path: &Path) -> Option<String> {
     let file = std::fs::File::open(path).ok()?;
     let reader = std::io::BufReader::new(file);
     for line in reader.lines() {
-        let line = line.ok()?;
-        let v: Value = serde_json::from_str(&line).ok()?;
+        let Ok(line) = line else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
         if let Some(cwd) = v["cwd"].as_str() {
             if !cwd.is_empty() {
                 return Some(cwd.to_string());
@@ -94,7 +94,7 @@ pub fn parse_session_title(path: &Path) -> Option<String> {
     // The summary entry is typically near the end — scan all, keep last one found
     let mut title = None;
     for line in content.lines() {
-        let Ok(v): Result<Value, _> = serde_json::from_str(line) else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
         if v["type"].as_str() == Some("summary") {
             if let Some(s) = v["summary"].as_str() {
                 if !s.is_empty() {
@@ -137,7 +137,7 @@ pub fn read_rename_history() -> std::collections::HashMap<String, String> {
     // Collect (timestamp, session_id, rename_title) triples, then keep latest per session
     let mut entries: Vec<(u64, String, String)> = Vec::new();
     for line in content.lines() {
-        let Ok(v): Result<Value, _> = serde_json::from_str(line) else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
         let session_id = match v["sessionId"].as_str() {
             Some(s) if !s.is_empty() => s.to_string(),
             _ => continue,
@@ -191,13 +191,7 @@ fn read_sessions_index(proj_path: &Path) -> Option<SessionIndex> {
 }
 
 fn path_to_display_name(abs_path: &str) -> String {
-    let parts: Vec<&str> = abs_path.trim_end_matches('/')
-        .split('/').filter(|s| !s.is_empty()).collect();
-    match parts.len() {
-        0 => abs_path.to_string(),
-        1 => parts[0].to_string(),
-        n => parts[n-2..].join("/"),
-    }
+    crate::util::path_last_n(abs_path, 2)
 }
 
 pub fn list_sessions() -> Result<Vec<Session>> {

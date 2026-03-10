@@ -107,7 +107,7 @@ pub async fn run() -> Result<()> {
 
     // Pre-load existing summaries from disk (single lock acquisition)
     {
-        let mut summaries = app.summaries.lock().expect("summary mutex poisoned");
+        let mut summaries = app.summaries.lock().unwrap_or_else(|e| e.into_inner());
         for session in &app.sessions {
             let path = match session.source {
                 SessionSource::ClaudeCode => summary_path(&session.session_id),
@@ -234,9 +234,12 @@ async fn run_event_loop(
                             let source = s.source.clone();
                             let summaries = app.summaries.clone();
                             let generating = app.generating.clone();
-                            app.summaries.lock().expect("summary mutex poisoned").remove(&id);
-                            app.generating.lock().expect("generating mutex poisoned").remove(&id);
-                            spawn_summary_generation(id, jsonl, source, summaries, generating);
+                    // Clear any cached (possibly stale) summary then kick off generation.
+                    // Do NOT pre-remove from `generating`: spawn_summary_generation
+                    // inserts the id immediately, so removing here creates a brief
+                    // window where the session appears idle.
+                    app.summaries.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+                    spawn_summary_generation(id, jsonl, source, summaries, generating);
                         }
                     }
 
@@ -314,22 +317,33 @@ async fn run_event_loop(
 
 fn spawn_summary_generation(
     id: String,
-    jsonl: Option<String>,   // None for OC sessions
+    jsonl: Option<String>,   // Some for CC sessions, None for OC sessions
     source: SessionSource,
     summaries: Arc<Mutex<std::collections::HashMap<String, String>>>,
     generating: Arc<Mutex<std::collections::HashSet<String>>>,
 ) {
-    generating.lock().expect("generating mutex poisoned").insert(id.clone());
+    generating.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone());
     tokio::spawn(async move {
-        // For OC sessions without a jsonl, skip auto-generation (no JSONL to parse)
-        let Some(jsonl_path) = jsonl else {
-            generating.lock().expect("generating mutex poisoned").remove(&id);
-            return;
+        // Fetch messages: CC reads from JSONL file, OC queries SQLite directly
+        let msgs = match source {
+            SessionSource::ClaudeCode => {
+                let Some(jsonl_path) = jsonl else {
+                    generating.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+                    return;
+                };
+                tokio::task::spawn_blocking({
+                    let p = jsonl_path.clone();
+                    move || crate::sessions::parse_messages(std::path::Path::new(&p))
+                }).await.ok().and_then(|r| r.ok())
+            }
+            SessionSource::OpenCode => {
+                let session_id = id.clone();
+                tokio::task::spawn_blocking(move || {
+                    crate::opencode_sessions::parse_opencode_messages(&session_id)
+                }).await.ok().and_then(|r| r.ok())
+            }
         };
-        let msgs = tokio::task::spawn_blocking({
-            let p = jsonl_path.clone();
-            move || crate::sessions::parse_messages(std::path::Path::new(&p))
-        }).await.ok().and_then(|r| r.ok());
+
         if let Some(msgs) = msgs {
             match crate::summary::generate_summary(&msgs).await {
                 Ok(text) => {
@@ -338,7 +352,7 @@ fn spawn_summary_generation(
                         SessionSource::OpenCode   => crate::summary::opencode_summary_path(&id),
                     };
                     let _ = crate::summary::write_summary(&out, &text);
-                    summaries.lock().expect("summary mutex poisoned").insert(id.clone(), text);
+                    summaries.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), text);
                 }
                 Err(e) => {
                     summaries
@@ -348,7 +362,7 @@ fn spawn_summary_generation(
                 }
             }
         }
-        generating.lock().expect("generating mutex poisoned").remove(&id);
+        generating.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
     });
 }
 
@@ -357,8 +371,8 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
 
     const MAX_JOB_LINES: usize = 3;
     let jobs: Vec<String> = {
-        let gen = app.generating.lock().expect("generating mutex poisoned");
-        let sum = app.summaries.lock().expect("summary mutex poisoned");
+        let gen = app.generating.lock().unwrap_or_else(|e| e.into_inner());
+        let sum = app.summaries.lock().unwrap_or_else(|e| e.into_inner());
         let mut items: Vec<String> = gen.iter().map(|id| {
             let label = app.sessions.iter()
                 .find(|s| &s.session_id == id)
@@ -445,7 +459,7 @@ fn draw_list(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
         .map(|&i| {
             let s = &app.sessions[i];
             let dt = format_time(s.modified);
-            let folder = path_last_n(&s.project_path, 3);
+            let folder = crate::util::path_last_n(&s.project_path, 3);
             let label = if s.summary.is_empty() {
                 truncate(&format!("[{}]", s.project_name), 21)
             } else {
@@ -558,21 +572,11 @@ fn format_time(t: std::time::SystemTime) -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    // SGT = UTC+8
-    const SGT_OFFSET_SECS: i64 = 8 * 3600;
-    chrono::DateTime::from_timestamp(secs as i64 + SGT_OFFSET_SECS, 0)
+    chrono::DateTime::from_timestamp(secs as i64, 0)
+        .map(|utc| utc.with_timezone(&chrono::Local))
         .unwrap_or_default()
         .format("%m-%d %H:%M")
         .to_string()
-}
-
-fn path_last_n(path: &str, n: usize) -> String {
-    let parts: Vec<&str> = path.trim_end_matches('/')
-        .split('/')
-        .filter(|s| !s.is_empty())
-        .collect();
-    let start = parts.len().saturating_sub(n);
-    parts[start..].join("/")
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -608,10 +612,13 @@ fn copy_to_clipboard(text: &str) -> anyhow::Result<()> {
             Ok(c) => c,
             Err(_) => continue,
         };
-        if let Some(stdin) = child.stdin.take() {
+        // Spawn a thread to write stdin so that `child.wait()` can drain the
+        // process's stdout/stderr concurrently, preventing pipe-buffer deadlocks
+        // on large summaries.
+        if let Some(mut stdin) = child.stdin.take() {
             use std::io::Write;
-            let mut stdin = stdin;
-            let _ = stdin.write_all(text.as_bytes());
+            let bytes = text.as_bytes().to_vec();
+            std::thread::spawn(move || { let _ = stdin.write_all(&bytes); });
         }
         let status = child.wait()?;
         if status.success() {
@@ -620,3 +627,46 @@ fn copy_to_clipboard(text: &str) -> anyhow::Result<()> {
     }
     anyhow::bail!("no clipboard tool found (tried clip.exe, xclip, xsel, pbcopy)")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_truncate_short_string_unchanged() {
+        assert_eq!(truncate("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_truncate_exact_length_unchanged() {
+        assert_eq!(truncate("hello", 5), "hello");
+    }
+
+    #[test]
+    fn test_truncate_long_string_adds_ellipsis() {
+        let result = truncate("abcdefghij", 5);
+        assert_eq!(result.chars().count(), 5);
+        assert!(result.ends_with('…'));
+    }
+
+    #[test]
+    fn test_truncate_unicode_counts_chars_not_bytes() {
+        // Each emoji is 1 char; truncate to 3 should keep 2 chars + ellipsis
+        let s = "😀😁😂😃😄";
+        let result = truncate(s, 3);
+        assert_eq!(result.chars().count(), 3);
+    }
+
+    #[test]
+    fn test_format_time_produces_month_day_hhmm() {
+        // epoch 0 = 1970-01-01 00:00:00 UTC; local offset may shift the hour but
+        // the format must always be MM-DD HH:MM (10 chars)
+        let t = std::time::UNIX_EPOCH;
+        let s = format_time(t);
+        assert_eq!(s.len(), 11, "expected 'MM-DD HH:MM', got: {}", s);
+        assert_eq!(&s[2..3], "-");
+        assert_eq!(&s[5..6], " ");
+        assert_eq!(&s[8..9], ":");
+    }
+}
+

@@ -1,5 +1,7 @@
 use std::time::SystemTime;
-use crate::sessions::Session;
+use anyhow::Result;
+use crate::sessions::{Session, list_sessions};
+use crate::opencode_sessions::list_opencode_sessions;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionSource {
@@ -38,10 +40,6 @@ impl From<Session> for UnifiedSession {
         }
     }
 }
-
-use anyhow::Result;
-use crate::sessions::list_sessions;
-use crate::opencode_sessions::list_opencode_sessions;
 
 /// Merge Claude Code and OpenCode sessions into a single list sorted by recency.
 pub fn list_all_sessions() -> Result<Vec<UnifiedSession>> {

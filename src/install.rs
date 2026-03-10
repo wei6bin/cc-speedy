@@ -16,7 +16,15 @@ pub fn build_hook_entry(binary_path: &str) -> Value {
 
 /// Install hook to a specific settings file path (used in tests)
 pub fn install_to(settings_path: &Path, binary_path: &str) -> Result<()> {
-    let content = std::fs::read_to_string(settings_path).unwrap_or_else(|_| "{}".to_string());
+    // Read existing settings, distinguishing "not found" from other IO errors.
+    // If the file doesn't exist yet we start from an empty object; any other
+    // read failure (e.g. permissions) is surfaced as an error rather than
+    // silently overwriting the file.
+    let content = match std::fs::read_to_string(settings_path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => "{}".to_string(),
+        Err(e) => return Err(anyhow::anyhow!("cannot read {:?}: {}", settings_path, e)),
+    };
     let mut settings: Value = serde_json::from_str(&content)?;
 
     // Build the entry first so the idempotency check uses the exact same command string

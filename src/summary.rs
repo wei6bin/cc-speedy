@@ -38,7 +38,7 @@ pub async fn generate_summary(messages: &[Message]) -> Result<String> {
         .join("\n");
 
     let prompt = format!(
-        "Summarize this Claude Code conversation in 3-5 bullet points.\n\
+        "Summarize this AI coding session in 3-5 bullet points.\n\
         Focus on: what was asked, what was done, files changed, final status.\n\
         Output markdown with ONLY these sections:\n\
         ## What was done\n- bullet\n\n## Files changed\n- file (or \"none\")\n\n## Status\nCompleted/In progress\n\n\
@@ -46,12 +46,17 @@ pub async fn generate_summary(messages: &[Message]) -> Result<String> {
         snippet
     );
 
-    // Use `claude -p` (non-interactive) so no separate API key is needed
-    let output = tokio::process::Command::new("claude")
-        .args(["--print", &prompt])
-        .output()
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to run `claude`: {}", e))?;
+    // Use `claude -p` (non-interactive) so no separate API key is needed.
+    // Enforce a 60-second timeout so a hung process doesn't stall the TUI forever.
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        tokio::process::Command::new("claude")
+            .args(["--print", &prompt])
+            .output(),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("claude --print timed out after 60 seconds"))?
+    .map_err(|e| anyhow::anyhow!("failed to run `claude`: {}", e))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

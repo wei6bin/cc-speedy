@@ -60,76 +60,22 @@ pub fn session_exists(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-pub fn resume_in_tmux(session_name: &str, project_path: &str, session_id: &str, yolo: bool, window_title: &str) -> Result<()> {
-    // Pass claude args directly — never via "sh -c" to avoid shell injection
-    let new_session = |detach: bool| -> Result<()> {
-        let mut cmd = std::process::Command::new("tmux");
-        cmd.arg("new-session");
-        if detach { cmd.arg("-d"); }
-        // -n sets the window name at creation; must come before the command separator
-        let mut args: Vec<&str> = vec!["-s", session_name, "-n", window_title, "-c", project_path,
-                                       "claude", "--resume", session_id];
-        if yolo { args.push("--dangerously-skip-permissions"); }
-        cmd.args(&args);
-        let status = cmd.status()?;
-        if !status.success() {
-            anyhow::bail!("tmux new-session failed: {}", status);
-        }
-        Ok(())
-    };
-
-    let pin_window_title = |target: &str| pin_window_title(target, window_title);
-
-    if is_inside_tmux() {
-        if session_exists(session_name) {
-            let status = std::process::Command::new("tmux")
-                .args(["switch-client", "-t", session_name])
-                .status()?;
-            if !status.success() {
-                anyhow::bail!("tmux switch-client failed: {}", status);
-            }
-            pin_window_title(session_name);
-        } else {
-            new_session(true)?;
-            let status = std::process::Command::new("tmux")
-                .args(["switch-client", "-t", session_name])
-                .status()?;
-            if !status.success() {
-                anyhow::bail!("tmux switch-client failed: {}", status);
-            }
-            pin_window_title(session_name);
-        }
-    } else {
-        // Outside tmux: create detached first so we can pin the title, then attach.
-        // If the session already exists (leftover from a previous run), just attach.
-        if !session_exists(session_name) {
-            new_session(true)?;
-        }
-        pin_window_title(session_name);
-        let status = std::process::Command::new("tmux")
-            .args(["attach-session", "-t", session_name])
-            .status()?;
-        if !status.success() {
-            anyhow::bail!("tmux attach-session failed: {}", status);
-        }
-    }
-    Ok(())
-}
-
-/// Resume an OpenCode session in a named tmux session.
-/// Runs `opencode` in the project directory (OpenCode loads the most recent
-/// session for that directory automatically).
-pub fn resume_opencode_in_tmux(
+/// Core helper: create-or-attach to a tmux session running `cmd`.
+/// `cmd` must be a non-empty slice where `cmd[0]` is the executable.
+/// Pass `detach_first = true` to always create detached then switch/attach.
+fn resume_in_tmux_with_cmd(
     session_name: &str,
     project_path: &str,
     window_title: &str,
+    cmd: &[&str],
 ) -> Result<()> {
-    let new_session = |detach: bool| -> Result<()> {
-        let mut cmd = std::process::Command::new("tmux");
-        cmd.arg("new-session");
-        if detach { cmd.arg("-d"); }
-        cmd.args(["-s", session_name, "-n", window_title, "-c", project_path, "opencode"]);
-        let status = cmd.status()?;
+    let start_session = |detach: bool| -> Result<()> {
+        let mut builder = std::process::Command::new("tmux");
+        builder.arg("new-session");
+        if detach { builder.arg("-d"); }
+        builder.args(["-s", session_name, "-n", window_title, "-c", project_path]);
+        builder.args(cmd);
+        let status = builder.status()?;
         if !status.success() {
             anyhow::bail!("tmux new-session failed: {}", status);
         }
@@ -137,27 +83,19 @@ pub fn resume_opencode_in_tmux(
     };
 
     if is_inside_tmux() {
-        if session_exists(session_name) {
-            let status = std::process::Command::new("tmux")
-                .args(["switch-client", "-t", session_name])
-                .status()?;
-            if !status.success() {
-                anyhow::bail!("tmux switch-client failed: {}", status);
-            }
-            pin_window_title(session_name, window_title);
-        } else {
-            new_session(true)?;
-            let status = std::process::Command::new("tmux")
-                .args(["switch-client", "-t", session_name])
-                .status()?;
-            if !status.success() {
-                anyhow::bail!("tmux switch-client failed: {}", status);
-            }
-            pin_window_title(session_name, window_title);
+        if !session_exists(session_name) {
+            start_session(true)?;
         }
+        let status = std::process::Command::new("tmux")
+            .args(["switch-client", "-t", session_name])
+            .status()?;
+        if !status.success() {
+            anyhow::bail!("tmux switch-client failed: {}", status);
+        }
+        pin_window_title(session_name, window_title);
     } else {
         if !session_exists(session_name) {
-            new_session(true)?;
+            start_session(true)?;
         }
         pin_window_title(session_name, window_title);
         let status = std::process::Command::new("tmux")
@@ -168,4 +106,29 @@ pub fn resume_opencode_in_tmux(
         }
     }
     Ok(())
+}
+
+/// Resume a Claude Code session in a named tmux session.
+/// Runs `claude --resume <session_id>` (optionally with `--dangerously-skip-permissions`).
+pub fn resume_in_tmux(
+    session_name: &str,
+    project_path: &str,
+    session_id: &str,
+    yolo: bool,
+    window_title: &str,
+) -> Result<()> {
+    let mut args = vec!["claude", "--resume", session_id];
+    if yolo { args.push("--dangerously-skip-permissions"); }
+    resume_in_tmux_with_cmd(session_name, project_path, window_title, &args)
+}
+
+/// Resume an OpenCode session in a named tmux session.
+/// Runs `opencode` in the project directory (OpenCode loads the most recent
+/// session for that directory automatically).
+pub fn resume_opencode_in_tmux(
+    session_name: &str,
+    project_path: &str,
+    window_title: &str,
+) -> Result<()> {
+    resume_in_tmux_with_cmd(session_name, project_path, window_title, &["opencode"])
 }

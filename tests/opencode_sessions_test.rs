@@ -1,4 +1,4 @@
-use cc_speedy::opencode_sessions::opencode_db_path;
+use cc_speedy::opencode_sessions::{opencode_db_path, parse_opencode_messages_from_conn};
 
 #[test]
 fn test_opencode_db_path_ends_with_db_file() {
@@ -34,7 +34,8 @@ fn setup_fixture_db() -> Connection {
         CREATE TABLE message (
             id TEXT PRIMARY KEY,
             session_id TEXT NOT NULL,
-            time_created INTEGER
+            time_created INTEGER,
+            data TEXT
         );
         CREATE TABLE part (
             id TEXT PRIMARY KEY,
@@ -62,12 +63,16 @@ fn setup_fixture_db() -> Connection {
             1741599000000, 1741600000000, NULL
         );
 
-        INSERT INTO message VALUES ('msg1', 'ses_aaa', 1741600000001);
-        INSERT INTO message VALUES ('msg2', 'ses_aaa', 1741600000002);
+        INSERT INTO message VALUES ('msg1', 'ses_aaa', 1741600000001, '{\"role\":\"user\"}');
+        INSERT INTO message VALUES ('msg2', 'ses_aaa', 1741600000002, '{\"role\":\"assistant\"}');
 
         INSERT INTO part VALUES (
             'prt1', 'msg1', 'ses_aaa', 1741600000001,
             '{\"type\":\"text\",\"text\":\"help me write tests\"}'
+        );
+        INSERT INTO part VALUES (
+            'prt2', 'msg2', 'ses_aaa', 1741600000002,
+            '{\"type\":\"text\",\"text\":\"Sure, here are some tests.\"}'
         );
     ").unwrap();
     conn
@@ -101,5 +106,36 @@ fn test_query_first_user_msg_extracted_from_parts() {
     let conn = setup_fixture_db();
     let sessions = query_sessions_from_conn(&conn).unwrap();
     assert_eq!(sessions[0].first_user_msg, "help me write tests");
+}
+
+#[test]
+fn test_parse_opencode_messages_returns_role_and_text() {
+    let conn = setup_fixture_db();
+    let messages = parse_opencode_messages_from_conn(&conn, "ses_aaa").unwrap();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0].role, "user");
+    assert_eq!(messages[0].text, "help me write tests");
+    assert_eq!(messages[1].role, "assistant");
+    assert_eq!(messages[1].text, "Sure, here are some tests.");
+}
+
+#[test]
+fn test_parse_opencode_messages_empty_for_unknown_session() {
+    let conn = setup_fixture_db();
+    let messages = parse_opencode_messages_from_conn(&conn, "no-such-session").unwrap();
+    assert!(messages.is_empty());
+}
+
+#[test]
+fn test_parse_opencode_messages_skips_non_text_parts() {
+    let conn = setup_fixture_db();
+    // Insert a tool-use part that should be ignored
+    conn.execute(
+        "INSERT INTO part VALUES ('prt3', 'msg1', 'ses_aaa', 1741600000003, '{\"type\":\"tool-use\",\"text\":\"ignored\"}')",
+        [],
+    ).unwrap();
+    let messages = parse_opencode_messages_from_conn(&conn, "ses_aaa").unwrap();
+    // Still only 2 text messages; tool-use part skipped
+    assert_eq!(messages.len(), 2);
 }
 

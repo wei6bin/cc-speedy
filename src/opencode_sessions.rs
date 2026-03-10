@@ -2,12 +2,70 @@ use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 use std::path::PathBuf;
 use std::time::{Duration, UNIX_EPOCH};
+use crate::sessions::Message;
 use crate::unified::{UnifiedSession, SessionSource};
 
 /// Path to the OpenCode SQLite database (~/.local/share/opencode/opencode.db).
 /// Returns None if the data_local_dir cannot be determined.
 pub fn opencode_db_path() -> Option<PathBuf> {
     dirs::data_local_dir().map(|d| d.join("opencode").join("opencode.db"))
+}
+
+/// Read all messages for an OpenCode session from the real DB.
+/// Returns Ok(vec![]) if the DB does not exist.
+/// Message roles come from `message.data` JSON `role` field.
+/// Message text comes from `part.data` JSON `text` field (type="text" parts only).
+pub fn parse_opencode_messages(session_id: &str) -> Result<Vec<Message>> {
+    let path = match opencode_db_path() {
+        Some(p) if p.exists() => p,
+        _ => return Ok(vec![]),
+    };
+    let conn = Connection::open_with_flags(
+        &path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    parse_opencode_messages_from_conn(&conn, session_id)
+}
+
+/// Query messages from an open connection (also used in tests).
+pub fn parse_opencode_messages_from_conn(conn: &Connection, session_id: &str) -> Result<Vec<Message>> {
+    // Each message has a role stored in its JSON data field.
+    // Text content lives in part rows whose data JSON has type="text".
+    // We group all text parts per message, ordered by message creation time.
+    let mut stmt = conn.prepare("
+        SELECT
+            json_extract(m.data, '$.role') AS role,
+            p.data AS part_data
+        FROM part p
+        JOIN message m ON m.id = p.message_id
+        WHERE m.session_id = ?1
+          AND p.data LIKE '{\"type\":\"text\"%'
+        ORDER BY m.time_created ASC, p.time_created ASC
+    ")?;
+
+    let rows: Vec<(String, String)> = stmt
+        .query_map([session_id], |row| {
+            Ok((
+                row.get::<_, String>(0).unwrap_or_default(),
+                row.get::<_, String>(1)?,
+            ))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let mut messages = Vec::with_capacity(rows.len());
+    for (role, part_data) in rows {
+        let v: serde_json::Value = match serde_json::from_str(&part_data) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let text = match v["text"].as_str() {
+            Some(t) if !t.is_empty() => t.to_string(),
+            _ => continue,
+        };
+        messages.push(Message { role, text });
+    }
+    Ok(messages)
 }
 
 /// List all top-level, non-archived OpenCode sessions from the real DB.
@@ -114,3 +172,5 @@ fn path_last_two(path: &str) -> String {
         n => parts[n - 2..].join("/"),
     }
 }
+
+

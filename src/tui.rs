@@ -15,8 +15,8 @@ use ratatui::{
 use std::io::stdout;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use crate::sessions::{list_sessions, Session};
-use crate::summary::{read_summary, summary_path};
+use crate::unified::{list_all_sessions, UnifiedSession, SessionSource};
+use crate::summary::{read_summary, summary_path, opencode_summary_path};
 
 #[derive(PartialEq)]
 enum Focus { List, Preview }
@@ -25,7 +25,7 @@ enum Focus { List, Preview }
 enum AppMode { Normal, Filter, Rename }
 
 struct AppState {
-    sessions: Vec<Session>,
+    sessions: Vec<UnifiedSession>,
     filtered: Vec<usize>,
     list_state: ListState,
     filter: String,
@@ -36,10 +36,11 @@ struct AppState {
     focus: Focus,
     preview_scroll: u16,
     status_msg: Option<(String, Instant)>,
+    source_filter: Option<SessionSource>,  // None = all, Some(CC) = CC only, Some(OC) = OC only
 }
 
 impl AppState {
-    fn new(sessions: Vec<Session>) -> Self {
+    fn new(sessions: Vec<UnifiedSession>) -> Self {
         let n = sessions.len();
         let mut list_state = ListState::default();
         if n > 0 {
@@ -57,6 +58,7 @@ impl AppState {
             focus: Focus::List,
             preview_scroll: 0,
             status_msg: None,
+            source_filter: None,
         }
     }
 
@@ -67,6 +69,11 @@ impl AppState {
             .iter()
             .enumerate()
             .filter(|(_, s)| {
+                // Source filter
+                if let Some(ref sf) = self.source_filter {
+                    if &s.source != sf { return false; }
+                }
+                // Text filter
                 q.is_empty()
                     || s.project_name.to_lowercase().contains(&q)
                     || s.summary.to_lowercase().contains(&q)
@@ -80,7 +87,7 @@ impl AppState {
         }
     }
 
-    fn selected_session(&self) -> Option<&Session> {
+    fn selected_session(&self) -> Option<&UnifiedSession> {
         let idx = self.list_state.selected()?;
         let raw = *self.filtered.get(idx)?;
         self.sessions.get(raw)
@@ -88,7 +95,7 @@ impl AppState {
 }
 
 pub async fn run() -> Result<()> {
-    let sessions = list_sessions()?;
+    let sessions = list_all_sessions()?;
 
     enable_raw_mode()?;
     let mut stdout = stdout();
@@ -102,7 +109,10 @@ pub async fn run() -> Result<()> {
     {
         let mut summaries = app.summaries.lock().expect("summary mutex poisoned");
         for session in &app.sessions {
-            let path = summary_path(&session.session_id);
+            let path = match session.source {
+                SessionSource::ClaudeCode => summary_path(&session.session_id),
+                SessionSource::OpenCode   => opencode_summary_path(&session.session_id),
+            };
             if let Some(content) = read_summary(&path) {
                 summaries.insert(session.session_id.clone(), content);
             }
@@ -221,32 +231,64 @@ async fn run_event_loop(
                         if let Some(s) = app.selected_session() {
                             let id = s.session_id.clone();
                             let jsonl = s.jsonl_path.clone();
+                            let source = s.source.clone();
                             let summaries = app.summaries.clone();
                             let generating = app.generating.clone();
                             app.summaries.lock().expect("summary mutex poisoned").remove(&id);
                             app.generating.lock().expect("generating mutex poisoned").remove(&id);
-                            spawn_summary_generation(id, jsonl, summaries, generating);
+                            spawn_summary_generation(id, jsonl, source, summaries, generating);
                         }
+                    }
+
+                    // Source filter keys
+                    (AppMode::Normal, KeyModifiers::NONE, KeyCode::Char('1')) => {
+                        app.source_filter = Some(SessionSource::ClaudeCode);
+                        app.apply_filter();
+                    }
+                    (AppMode::Normal, KeyModifiers::NONE, KeyCode::Char('2')) => {
+                        app.source_filter = Some(SessionSource::OpenCode);
+                        app.apply_filter();
+                    }
+                    (AppMode::Normal, KeyModifiers::NONE, KeyCode::Char('0')) => {
+                        app.source_filter = None;
+                        app.apply_filter();
                     }
 
                     (AppMode::Normal, _, KeyCode::Enter) => {
                         if let Some(s) = app.selected_session() {
-                            let name = crate::tmux::session_name_from_path(&s.project_path);
-                            let path = s.project_path.clone();
-                            let id = s.session_id.clone();
+                            let path  = s.project_path.clone();
+                            let id    = s.session_id.clone();
                             let title = window_title_from_session(s);
-                            return crate::tmux::resume_in_tmux(&name, &path, &id, false, &title);
+                            match s.source {
+                                SessionSource::ClaudeCode => {
+                                    let name = crate::tmux::cc_session_name(&path);
+                                    return crate::tmux::resume_in_tmux(&name, &path, &id, false, &title);
+                                }
+                                SessionSource::OpenCode => {
+                                    let name = crate::tmux::oc_session_name(&path);
+                                    return crate::tmux::resume_opencode_in_tmux(&name, &path, &title);
+                                }
+                            }
                         }
                     }
 
                     // Ctrl+Y: yolo mode
                     (AppMode::Normal, KeyModifiers::CONTROL, KeyCode::Char('y')) => {
                         if let Some(s) = app.selected_session() {
-                            let name = crate::tmux::session_name_from_path(&s.project_path);
-                            let path = s.project_path.clone();
-                            let id = s.session_id.clone();
+                            let path  = s.project_path.clone();
+                            let id    = s.session_id.clone();
                             let title = window_title_from_session(s);
-                            return crate::tmux::resume_in_tmux(&name, &path, &id, true, &title);
+                            match s.source {
+                                SessionSource::ClaudeCode => {
+                                    let name = crate::tmux::cc_session_name(&path);
+                                    return crate::tmux::resume_in_tmux(&name, &path, &id, true, &title);
+                                }
+                                SessionSource::OpenCode => {
+                                    // OpenCode has no --dangerously-skip-permissions; fall back to normal resume
+                                    let name = crate::tmux::oc_session_name(&path);
+                                    return crate::tmux::resume_opencode_in_tmux(&name, &path, &title);
+                                }
+                            }
                         }
                     }
 
@@ -272,20 +314,29 @@ async fn run_event_loop(
 
 fn spawn_summary_generation(
     id: String,
-    jsonl: String,
+    jsonl: Option<String>,   // None for OC sessions
+    source: SessionSource,
     summaries: Arc<Mutex<std::collections::HashMap<String, String>>>,
     generating: Arc<Mutex<std::collections::HashSet<String>>>,
 ) {
     generating.lock().expect("generating mutex poisoned").insert(id.clone());
     tokio::spawn(async move {
+        // For OC sessions without a jsonl, skip auto-generation (no JSONL to parse)
+        let Some(jsonl_path) = jsonl else {
+            generating.lock().expect("generating mutex poisoned").remove(&id);
+            return;
+        };
         let msgs = tokio::task::spawn_blocking({
-            let jsonl = jsonl.clone();
-            move || crate::sessions::parse_messages(std::path::Path::new(&jsonl))
+            let p = jsonl_path.clone();
+            move || crate::sessions::parse_messages(std::path::Path::new(&p))
         }).await.ok().and_then(|r| r.ok());
         if let Some(msgs) = msgs {
             match crate::summary::generate_summary(&msgs).await {
                 Ok(text) => {
-                    let out = crate::summary::summary_path(&id);
+                    let out = match source {
+                        SessionSource::ClaudeCode => crate::summary::summary_path(&id),
+                        SessionSource::OpenCode   => crate::summary::opencode_summary_path(&id),
+                    };
                     let _ = crate::summary::write_summary(&out, &text);
                     summaries.lock().expect("summary mutex poisoned").insert(id.clone(), text);
                 }
@@ -377,11 +428,11 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
         if at.elapsed().as_secs() < 2 {
             (msg.as_str(), Style::default().fg(Color::Green))
         } else {
-            (" Enter: resume  Ctrl+Y: yolo  Tab: preview  j/k: nav  /: filter  r: rename  c: copy  Ctrl+R: regen  q: quit",
+            (" 1:CC  2:OC  0:all  /: filter  Enter: resume  Ctrl+Y: yolo  Tab  j/k  r  c  Ctrl+R  q",
              Style::default().fg(Color::DarkGray))
         }
     } else {
-        (" Enter: resume  Ctrl+Y: yolo  Tab: preview  j/k: nav  /: filter  r: rename  c: copy  Ctrl+R: regen  q: quit",
+        (" 1:CC  2:OC  0:all  /: filter  Enter: resume  Ctrl+Y: yolo  Tab  j/k  r  c  Ctrl+R  q",
          Style::default().fg(Color::DarkGray))
     };
     f.render_widget(Paragraph::new(status_text).style(status_style), chunks[3]);
@@ -400,8 +451,13 @@ fn draw_list(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
             } else {
                 truncate(&s.summary, 21)
             };
+            let (badge_text, badge_color) = match s.source {
+                SessionSource::ClaudeCode => ("[CC]", Color::Green),
+                SessionSource::OpenCode   => ("[OC]", Color::Cyan),
+            };
             let line = Line::from(vec![
                 Span::styled(format!("{} ", dt), Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{} ", badge_text), Style::default().fg(badge_color)),
                 Span::raw(format!("{:<22}", label)),
                 Span::styled(format!("{:>4} ", s.message_count), Style::default().fg(Color::DarkGray)),
                 Span::styled(folder, Style::default().fg(Color::DarkGray)),
@@ -458,7 +514,10 @@ fn build_preview_content(app: &AppState) -> String {
             };
 
             let generated_line = {
-                let path = crate::summary::summary_path(&s.session_id);
+                let path = match s.source {
+                    SessionSource::ClaudeCode => crate::summary::summary_path(&s.session_id),
+                    SessionSource::OpenCode   => crate::summary::opencode_summary_path(&s.session_id),
+                };
                 match std::fs::metadata(&path).and_then(|m| m.modified()) {
                     Ok(t) => format!("\n\n─── generated {} ───", format_time(t)),
                     Err(_) => String::new(),
@@ -524,7 +583,7 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-fn window_title_from_session(s: &Session) -> String {
+fn window_title_from_session(s: &UnifiedSession) -> String {
     let label = if !s.summary.is_empty() { &s.summary } else { &s.project_name };
     truncate(label, 10)
 }

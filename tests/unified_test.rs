@@ -48,3 +48,14 @@ fn test_opencode_session_has_no_jsonl_path() {
     };
     assert!(s.jsonl_path.is_none());
 }
+
+use cc_speedy::unified::list_all_sessions;
+
+#[test]
+fn test_list_all_sessions_does_not_panic() {
+    // Smoke test: just ensure it returns without panicking.
+    // Real DB may or may not exist on the test machine.
+    let result = list_all_sessions();
+    assert!(result.is_ok(), "list_all_sessions returned error: {:?}", result);
+}
+

@@ -4,3 +4,4 @@ pub mod tmux;
 pub mod install;
 pub mod tui;
 pub mod unified;
+pub mod opencode_sessions;

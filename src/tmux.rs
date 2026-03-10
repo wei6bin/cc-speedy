@@ -17,6 +17,18 @@ pub fn session_name_from_path(path: &str) -> String {
         .collect()
 }
 
+/// Tmux session name for a Claude Code session: "cc-<last-2-path-segments>", max 50 chars.
+pub fn cc_session_name(project_path: &str) -> String {
+    let base = session_name_from_path(project_path);
+    format!("cc-{}", base).chars().take(50).collect()
+}
+
+/// Tmux session name for an OpenCode session: "oc-<last-2-path-segments>", max 50 chars.
+pub fn oc_session_name(project_path: &str) -> String {
+    let base = session_name_from_path(project_path);
+    format!("oc-{}", base).chars().take(50).collect()
+}
+
 pub fn is_inside_tmux() -> bool {
     std::env::var("TMUX").is_ok()
 }
@@ -94,6 +106,60 @@ pub fn resume_in_tmux(session_name: &str, project_path: &str, session_id: &str, 
             new_session(true)?;
         }
         pin_window_title(session_name);
+        let status = std::process::Command::new("tmux")
+            .args(["attach-session", "-t", session_name])
+            .status()?;
+        if !status.success() {
+            anyhow::bail!("tmux attach-session failed: {}", status);
+        }
+    }
+    Ok(())
+}
+
+/// Resume an OpenCode session in a named tmux session.
+/// Runs `opencode` in the project directory (OpenCode loads the most recent
+/// session for that directory automatically).
+pub fn resume_opencode_in_tmux(
+    session_name: &str,
+    project_path: &str,
+    window_title: &str,
+) -> Result<()> {
+    let new_session = |detach: bool| -> Result<()> {
+        let mut cmd = std::process::Command::new("tmux");
+        cmd.arg("new-session");
+        if detach { cmd.arg("-d"); }
+        cmd.args(["-s", session_name, "-n", window_title, "-c", project_path, "opencode"]);
+        let status = cmd.status()?;
+        if !status.success() {
+            anyhow::bail!("tmux new-session failed: {}", status);
+        }
+        Ok(())
+    };
+
+    if is_inside_tmux() {
+        if session_exists(session_name) {
+            let status = std::process::Command::new("tmux")
+                .args(["switch-client", "-t", session_name])
+                .status()?;
+            if !status.success() {
+                anyhow::bail!("tmux switch-client failed: {}", status);
+            }
+            pin_window_title(session_name, window_title);
+        } else {
+            new_session(true)?;
+            let status = std::process::Command::new("tmux")
+                .args(["switch-client", "-t", session_name])
+                .status()?;
+            if !status.success() {
+                anyhow::bail!("tmux switch-client failed: {}", status);
+            }
+            pin_window_title(session_name, window_title);
+        }
+    } else {
+        if !session_exists(session_name) {
+            new_session(true)?;
+        }
+        pin_window_title(session_name, window_title);
         let status = std::process::Command::new("tmux")
             .args(["attach-session", "-t", session_name])
             .status()?;

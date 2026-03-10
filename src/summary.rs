@@ -104,3 +104,17 @@ pub fn find_jsonl(session_id: &str) -> Option<String> {
     }
     None
 }
+
+/// Path for OpenCode session summaries.
+/// Stored under ~/.local/share/opencode/summaries/<session-id>.md
+pub fn opencode_summary_path(session_id: &str) -> PathBuf {
+    let safe: String = session_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    dirs::data_local_dir()
+        .expect("data_local_dir must be set")
+        .join("opencode")
+        .join("summaries")
+        .join(format!("{}.md", safe))
+}

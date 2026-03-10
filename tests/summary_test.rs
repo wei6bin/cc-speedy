@@ -64,3 +64,21 @@ fn test_find_jsonl_returns_none_for_nonexistent_session() {
     let result = find_jsonl("nonexistent-session-id-xxxxxx");
     assert!(result.is_none());
 }
+
+#[test]
+fn test_opencode_summary_path_uses_local_share() {
+    let path = cc_speedy::summary::opencode_summary_path("ses_abc123");
+    let path_str = path.to_string_lossy();
+    assert!(path_str.contains("opencode"), "path should contain 'opencode': {}", path_str);
+    assert!(path_str.contains("ses_abc123"), "path should contain session id: {}", path_str);
+    assert!(path_str.ends_with(".md"));
+}
+
+#[test]
+fn test_opencode_summary_path_sanitizes_id() {
+    // path traversal attempt should be neutralised
+    let path = cc_speedy::summary::opencode_summary_path("../../etc/passwd");
+    let path_str = path.to_string_lossy();
+    assert!(!path_str.contains(".."), "path should not contain '..': {}", path_str);
+}
+

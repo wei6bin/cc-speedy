@@ -9,3 +9,97 @@ fn test_opencode_db_path_ends_with_db_file() {
     }
     // If None: opencode not installed; that's acceptable — test passes
 }
+
+use rusqlite::Connection;
+use cc_speedy::opencode_sessions::query_sessions_from_conn;
+
+fn setup_fixture_db() -> Connection {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch("
+        CREATE TABLE project (
+            id TEXT PRIMARY KEY,
+            worktree TEXT NOT NULL,
+            time_created INTEGER,
+            time_updated INTEGER
+        );
+        CREATE TABLE session (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            parent_id TEXT,
+            title TEXT,
+            time_updated INTEGER NOT NULL,
+            time_archived INTEGER,
+            summary_diffs TEXT
+        );
+        CREATE TABLE message (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            time_created INTEGER
+        );
+        CREATE TABLE part (
+            id TEXT PRIMARY KEY,
+            message_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            time_created INTEGER,
+            data TEXT
+        );
+
+        INSERT INTO project VALUES ('proj1', '/home/user/ai/myproj', 1000, 2000);
+
+        -- top-level session (should appear)
+        INSERT INTO session VALUES (
+            'ses_aaa', 'proj1', NULL, 'my title',
+            1741600000000, NULL, NULL
+        );
+        -- sub-agent session (parent_id set — should be filtered out)
+        INSERT INTO session VALUES (
+            'ses_bbb', 'proj1', 'ses_aaa', 'subagent',
+            1741600001000, NULL, NULL
+        );
+        -- archived session (should be filtered out)
+        INSERT INTO session VALUES (
+            'ses_ccc', 'proj1', NULL, 'old',
+            1741599000000, 1741600000000, NULL
+        );
+
+        INSERT INTO message VALUES ('msg1', 'ses_aaa', 1741600000001);
+        INSERT INTO message VALUES ('msg2', 'ses_aaa', 1741600000002);
+
+        INSERT INTO part VALUES (
+            'prt1', 'msg1', 'ses_aaa', 1741600000001,
+            '{\"type\":\"text\",\"text\":\"help me write tests\"}'
+        );
+    ").unwrap();
+    conn
+}
+
+#[test]
+fn test_query_returns_top_level_sessions_only() {
+    let conn = setup_fixture_db();
+    let sessions = query_sessions_from_conn(&conn).unwrap();
+    assert_eq!(sessions.len(), 1, "expected 1 session, got: {:?}", sessions.iter().map(|s| &s.session_id).collect::<Vec<_>>());
+    assert_eq!(sessions[0].session_id, "ses_aaa");
+}
+
+#[test]
+fn test_query_session_title_and_project_path() {
+    let conn = setup_fixture_db();
+    let sessions = query_sessions_from_conn(&conn).unwrap();
+    assert_eq!(sessions[0].summary, "my title");
+    assert_eq!(sessions[0].project_path, "/home/user/ai/myproj");
+}
+
+#[test]
+fn test_query_message_count() {
+    let conn = setup_fixture_db();
+    let sessions = query_sessions_from_conn(&conn).unwrap();
+    assert_eq!(sessions[0].message_count, 2);
+}
+
+#[test]
+fn test_query_first_user_msg_extracted_from_parts() {
+    let conn = setup_fixture_db();
+    let sessions = query_sessions_from_conn(&conn).unwrap();
+    assert_eq!(sessions[0].first_user_msg, "help me write tests");
+}
+

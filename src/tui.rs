@@ -269,7 +269,7 @@ async fn run_event_loop(
                                 }
                                 SessionSource::OpenCode => {
                                     let name = crate::tmux::oc_session_name(&path);
-                                    return crate::tmux::resume_opencode_in_tmux(&name, &path, &title);
+                                    return crate::tmux::resume_opencode_in_tmux(&name, &path, &id, &title);
                                 }
                             }
                         }
@@ -289,7 +289,7 @@ async fn run_event_loop(
                                 SessionSource::OpenCode => {
                                     // OpenCode has no --dangerously-skip-permissions; fall back to normal resume
                                     let name = crate::tmux::oc_session_name(&path);
-                                    return crate::tmux::resume_opencode_in_tmux(&name, &path, &title);
+                                    return crate::tmux::resume_opencode_in_tmux(&name, &path, &id, &title);
                                 }
                             }
                         }

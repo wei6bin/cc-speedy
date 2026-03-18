@@ -442,10 +442,14 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
     if jobs_height > 0 {
         let text = jobs.join("\n");
         let jobs_panel = Paragraph::new(text)
-            .block(Block::default().borders(Borders::ALL)
-                .title(" Background ")
-                .border_style(Style::default().fg(Color::Yellow)))
-            .style(Style::default().fg(Color::Yellow));
+            .block(
+                Block::default()
+                    .border_type(theme::BORDER_TYPE)
+                    .borders(Borders::ALL)
+                    .border_style(theme::panel_block_style(theme::BORDER_JOBS))
+                    .title(Span::styled(" Background ", theme::title_style())),
+            )
+            .style(Style::default().fg(theme::JOBS_FG));
         f.render_widget(jobs_panel, chunks[2]);
     }
 

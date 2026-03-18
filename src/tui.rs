@@ -420,7 +420,13 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
         }
     };
     let filter_block = Paragraph::new(bar_text)
-        .block(Block::default().borders(Borders::ALL).title(bar_title));
+        .block(
+            Block::default()
+                .border_type(theme::BORDER_TYPE)
+                .borders(Borders::ALL)
+                .border_style(theme::panel_block_style(theme::BORDER_TOP))
+                .title(Span::styled(bar_title, theme::title_style())),
+        );
     f.render_widget(filter_block, chunks[0]);
 
     // Main panes

@@ -482,33 +482,35 @@ fn draw_list(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
                 truncate(&s.summary, 21)
             };
             let (badge_text, badge_color) = match s.source {
-                SessionSource::ClaudeCode => ("[CC]", Color::Green),
-                SessionSource::OpenCode   => ("[OC]", Color::Cyan),
+                SessionSource::ClaudeCode => ("[CC]", theme::CC_BADGE),
+                SessionSource::OpenCode   => ("[OC]", theme::OC_BADGE),
             };
             let line = Line::from(vec![
-                Span::styled(format!("{} ", dt), Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{} ", dt), theme::dim_style()),
                 Span::styled(format!("{} ", badge_text), Style::default().fg(badge_color)),
-                Span::raw(format!("{:<22}", label)),
-                Span::styled(format!("{:>4} ", s.message_count), Style::default().fg(Color::DarkGray)),
-                Span::styled(folder, Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{:<22}", label), Style::default().fg(theme::FG)),
+                Span::styled(format!("{:>4} ", s.message_count), theme::dim_style()),
+                Span::styled(folder, theme::dim_style()),
             ]);
             ListItem::new(line)
         })
         .collect();
 
     let count = items.len();
+    let focused = app.focus == Focus::List;
+    let border_color = if focused { theme::BORDER_FOCUSED } else { theme::BORDER_LIST };
     let list = List::new(items)
         .block(
             Block::default()
+                .border_type(theme::BORDER_TYPE)
                 .borders(Borders::ALL)
-                .title(format!(" Sessions ({}) ", count)),
+                .border_style(theme::panel_block_style(border_color))
+                .title(Span::styled(
+                    format!(" Sessions ({}) ", count),
+                    theme::title_style(),
+                )),
         )
-        .highlight_style(
-            Style::default()
-                .bg(Color::Blue)
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        )
+        .highlight_style(theme::sel_style())
         .highlight_symbol("► ");
 
     f.render_stateful_widget(list, area, &mut app.list_state);

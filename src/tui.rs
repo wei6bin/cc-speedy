@@ -456,14 +456,14 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
     // Status bar: show timed flash message, or the key hint
     let (status_text, status_style) = if let Some((msg, at)) = &app.status_msg {
         if at.elapsed().as_secs() < 2 {
-            (msg.as_str(), Style::default().fg(Color::Green))
+            (msg.as_str(), Style::default().fg(theme::STATUS_OK))
         } else {
             (" 1:CC  2:OC  0:all  /: filter  Enter: resume  Ctrl+Y: yolo  Tab  j/k  r  c  Ctrl+R  q",
-             Style::default().fg(Color::DarkGray))
+             Style::default().fg(theme::STATUS_HELP))
         }
     } else {
         (" 1:CC  2:OC  0:all  /: filter  Enter: resume  Ctrl+Y: yolo  Tab  j/k  r  c  Ctrl+R  q",
-         Style::default().fg(Color::DarkGray))
+         Style::default().fg(theme::STATUS_HELP))
     };
     f.render_widget(Paragraph::new(status_text).style(status_style), chunks[3]);
 }

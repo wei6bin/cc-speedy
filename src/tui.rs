@@ -574,10 +574,15 @@ fn draw_preview(f: &mut ratatui::Frame, app: &mut AppState, area: Rect, scroll: 
     let content = build_preview_content(app);
 
     let focused = app.focus == Focus::Preview;
+    let border_color = if focused { theme::BORDER_FOCUSED } else { theme::BORDER_PREVIEW };
     let block = Block::default()
+        .border_type(theme::BORDER_TYPE)
         .borders(Borders::ALL)
-        .title(if focused { " Summary  [Tab: back to list] " } else { " Summary  [Tab: scroll] " })
-        .border_style(if focused { Style::default().fg(Color::Cyan) } else { Style::default() });
+        .border_style(theme::panel_block_style(border_color))
+        .title(Span::styled(
+            if focused { " Summary  [Tab: back to list] " } else { " Summary  [Tab: scroll] " },
+            theme::title_style(),
+        ));
     let preview = Paragraph::new(content)
         .block(block)
         .wrap(Wrap { trim: false })

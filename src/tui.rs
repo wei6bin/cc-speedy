@@ -9,7 +9,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph, Wrap},
     Terminal,
 };
 use std::io::stdout;
@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use crate::unified::{list_all_sessions, UnifiedSession, SessionSource};
 use crate::summary::{read_summary, summary_path, opencode_summary_path};
+use crate::theme;
 
 #[derive(PartialEq)]
 enum Focus { List, Preview }
@@ -368,6 +369,11 @@ fn spawn_summary_generation(
 
 fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
     let area = f.area();
+    // Paint dark canvas before any panels (btop #1e2124 background)
+    f.render_widget(
+        Block::default().style(Style::default().bg(theme::BG).fg(theme::FG)),
+        area,
+    );
 
     const MAX_JOB_LINES: usize = 3;
     let jobs: Vec<String> = {

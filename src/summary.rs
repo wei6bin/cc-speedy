@@ -80,9 +80,19 @@ pub async fn run_hook() -> Result<()> {
         return Ok(());
     }
 
-    let out_path = summary_path(&session_id);
-    if out_path.exists() {
-        return Ok(());  // already summarized
+    let conn = crate::store::open_db()?;
+
+    // Skip if already summarised
+    let exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM summaries WHERE session_id = ?1",
+            rusqlite::params![session_id],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+        > 0;
+    if exists {
+        return Ok(());
     }
 
     let jsonl = find_jsonl(&session_id);
@@ -93,8 +103,8 @@ pub async fn run_hook() -> Result<()> {
 
     let messages = crate::sessions::parse_messages(std::path::Path::new(&jsonl_path))?;
     let summary = generate_summary(&messages).await?;
-    write_summary(&out_path, &summary)?;
-    eprintln!("cc-speedy: summary written to {:?}", out_path);
+    crate::store::save_summary(&conn, &session_id, "cc", &summary)?;
+    eprintln!("cc-speedy: summary saved to db for session {}", session_id);
     Ok(())
 }
 

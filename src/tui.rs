@@ -9,21 +9,20 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::Style,
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
     Terminal,
 };
 use std::io::stdout;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use crate::unified::{list_all_sessions, UnifiedSession, SessionSource};
-use crate::summary::{read_summary, summary_path, opencode_summary_path};
 use crate::theme;
 
 #[derive(PartialEq)]
 enum Focus { List, Preview }
 
 #[derive(PartialEq)]
-enum AppMode { Normal, Filter, Rename }
+enum AppMode { Normal, Filter, Rename, PinMenu }
 
 struct AppState {
     sessions: Vec<UnifiedSession>,
@@ -33,34 +32,43 @@ struct AppState {
     mode: AppMode,
     rename_input: String,
     summaries: Arc<Mutex<std::collections::HashMap<String, String>>>,
+    summary_generated_at: Arc<Mutex<std::collections::HashMap<String, i64>>>,
     generating: Arc<Mutex<std::collections::HashSet<String>>>,
     focus: Focus,
     preview_scroll: u16,
     status_msg: Option<(String, Instant)>,
     source_filter: Option<SessionSource>,  // None = all, Some(CC) = CC only, Some(OC) = OC only
+    pinned: std::collections::HashSet<String>,
+    db: Arc<Mutex<rusqlite::Connection>>,
 }
 
 impl AppState {
-    fn new(sessions: Vec<UnifiedSession>) -> Self {
+    fn new(sessions: Vec<UnifiedSession>, conn: rusqlite::Connection) -> anyhow::Result<Self> {
         let n = sessions.len();
         let mut list_state = ListState::default();
         if n > 0 {
             list_state.select(Some(0));
         }
-        Self {
+        let summaries_map = crate::store::load_all_summaries(&conn)?;
+        let generated_at  = crate::store::load_all_generated_at(&conn)?;
+        let pinned        = crate::store::load_pinned(&conn)?;
+        Ok(Self {
             filtered: (0..n).collect(),
             sessions,
             list_state,
             filter: String::new(),
             mode: AppMode::Normal,
             rename_input: String::new(),
-            summaries: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            summaries: Arc::new(Mutex::new(summaries_map)),
+            summary_generated_at: Arc::new(Mutex::new(generated_at)),
             generating: Arc::new(Mutex::new(std::collections::HashSet::new())),
             focus: Focus::List,
             preview_scroll: 0,
             status_msg: None,
             source_filter: None,
-        }
+            pinned,
+            db: Arc::new(Mutex::new(conn)),
+        })
     }
 
     fn apply_filter(&mut self) {
@@ -81,6 +89,11 @@ impl AppState {
             })
             .map(|(i, _)| i)
             .collect();
+        // Pinned sessions float to the top, preserving relative order within each group.
+        let pinned = &self.pinned;
+        self.filtered.sort_by_key(|&i| {
+            if pinned.contains(&self.sessions[i].session_id) { 0u8 } else { 1u8 }
+        });
         if !self.filtered.is_empty() {
             self.list_state.select(Some(0));
         } else {
@@ -98,27 +111,16 @@ impl AppState {
 pub async fn run() -> Result<()> {
     let sessions = list_all_sessions()?;
 
+    let conn = crate::store::open_db()?;
+    crate::store::migrate_from_files(&conn)?;
+
     enable_raw_mode()?;
     let mut stdout = stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = AppState::new(sessions);
-
-    // Pre-load existing summaries from disk (single lock acquisition)
-    {
-        let mut summaries = app.summaries.lock().unwrap_or_else(|e| e.into_inner());
-        for session in &app.sessions {
-            let path = match session.source {
-                SessionSource::ClaudeCode => summary_path(&session.session_id),
-                SessionSource::OpenCode   => opencode_summary_path(&session.session_id),
-            };
-            if let Some(content) = read_summary(&path) {
-                summaries.insert(session.session_id.clone(), content);
-            }
-        }
-    }
+    let mut app = AppState::new(sessions, conn)?;
 
     // Run event loop, always clean up terminal regardless of result
     let result = run_event_loop(&mut terminal, &mut app).await;
@@ -234,13 +236,13 @@ async fn run_event_loop(
                             let jsonl = s.jsonl_path.clone();
                             let source = s.source.clone();
                             let summaries = app.summaries.clone();
+                            let generated_at = app.summary_generated_at.clone();
                             let generating = app.generating.clone();
+                            let db = app.db.clone();
                     // Clear any cached (possibly stale) summary then kick off generation.
-                    // Do NOT pre-remove from `generating`: spawn_summary_generation
-                    // inserts the id immediately, so removing here creates a brief
-                    // window where the session appears idle.
                     app.summaries.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
-                    spawn_summary_generation(id, jsonl, source, summaries, generating);
+                    app.summary_generated_at.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+                    spawn_summary_generation(id, jsonl, source, summaries, generated_at, generating, db);
                         }
                     }
 
@@ -306,6 +308,38 @@ async fn run_event_loop(
                         app.status_msg = Some((msg, Instant::now()));
                     }
 
+                    // x: open pin/unpin popup
+                    (AppMode::Normal, KeyModifiers::NONE, KeyCode::Char('x')) => {
+                        if app.selected_session().is_some() {
+                            app.mode = AppMode::PinMenu;
+                        }
+                    }
+
+                    // --- PinMenu mode ---
+                    (AppMode::PinMenu, _, KeyCode::Esc) => {
+                        app.mode = AppMode::Normal;
+                    }
+                    (AppMode::PinMenu, _, KeyCode::Char('p')) => {
+                        if let Some(id) = app.selected_session().map(|s| s.session_id.clone()) {
+                            let newly_pinned = if app.pinned.contains(&id) {
+                                app.pinned.remove(&id);
+                                false
+                            } else {
+                                app.pinned.insert(id.clone());
+                                true
+                            };
+                            let _ = crate::store::set_pinned(
+                                &app.db.lock().unwrap_or_else(|e| e.into_inner()),
+                                &id,
+                                newly_pinned,
+                            );
+                            app.apply_filter();
+                            let msg = if newly_pinned { "Pinned" } else { "Unpinned" };
+                            app.status_msg = Some((msg.to_string(), Instant::now()));
+                        }
+                        app.mode = AppMode::Normal;
+                    }
+
                     _ => {}
                 }
             }
@@ -321,7 +355,9 @@ fn spawn_summary_generation(
     jsonl: Option<String>,   // Some for CC sessions, None for OC sessions
     source: SessionSource,
     summaries: Arc<Mutex<std::collections::HashMap<String, String>>>,
+    summary_generated_at: Arc<Mutex<std::collections::HashMap<String, i64>>>,
     generating: Arc<Mutex<std::collections::HashSet<String>>>,
+    db: Arc<Mutex<rusqlite::Connection>>,
 ) {
     generating.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone());
     tokio::spawn(async move {
@@ -346,19 +382,28 @@ fn spawn_summary_generation(
         };
 
         if let Some(msgs) = msgs {
+            let src_str = match source {
+                SessionSource::ClaudeCode => "cc",
+                SessionSource::OpenCode   => "oc",
+            };
             match crate::summary::generate_summary(&msgs).await {
                 Ok(text) => {
-                    let out = match source {
-                        SessionSource::ClaudeCode => crate::summary::summary_path(&id),
-                        SessionSource::OpenCode   => crate::summary::opencode_summary_path(&id),
-                    };
-                    let _ = crate::summary::write_summary(&out, &text);
+                    let ts = crate::store::save_summary(
+                        &db.lock().unwrap_or_else(|e| e.into_inner()),
+                        &id, src_str, &text,
+                    ).unwrap_or_else(|_| {
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs() as i64
+                    });
                     summaries.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), text);
+                    summary_generated_at.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), ts);
                 }
                 Err(e) => {
                     summaries
                         .lock()
-                        .expect("summary mutex poisoned")
+                        .unwrap_or_else(|e| e.into_inner())
                         .insert(id.clone(), format!("Error generating summary: {}", e));
                 }
             }
@@ -410,6 +455,7 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
     let (bar_text, bar_title) = match &app.mode {
         AppMode::Filter => (format!("> {}|", app.filter), " Filter "),
         AppMode::Rename => (format!("rename: {}|", app.rename_input), " Rename  [Enter: confirm  Esc: cancel] "),
+        AppMode::PinMenu => ("".to_string(), " cc-speedy "),
         AppMode::Normal => {
             let hint = if app.filter.is_empty() {
                 "  (press / to filter)".to_string()
@@ -458,14 +504,19 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
         if at.elapsed().as_secs() < 2 {
             (msg.as_str(), Style::default().fg(theme::STATUS_OK))
         } else {
-            (" 1:CC  2:OC  0:all  /: filter  Enter: resume  Ctrl+Y: yolo  Tab  j/k  r  c  Ctrl+R  q",
+            (" 1:CC  2:OC  0:all  /: filter  Enter: resume  Ctrl+Y: yolo  Tab  j/k  r  c  x: pin  Ctrl+R  q",
              Style::default().fg(theme::STATUS_HELP))
         }
     } else {
-        (" 1:CC  2:OC  0:all  /: filter  Enter: resume  Ctrl+Y: yolo  Tab  j/k  r  c  Ctrl+R  q",
+        (" 1:CC  2:OC  0:all  /: filter  Enter: resume  Ctrl+Y: yolo  Tab  j/k  r  c  x: pin  Ctrl+R  q",
          Style::default().fg(theme::STATUS_HELP))
     };
     f.render_widget(Paragraph::new(status_text).style(status_style), chunks[3]);
+
+    // Overlay popup for pin/unpin
+    if app.mode == AppMode::PinMenu {
+        draw_pin_popup(f, app, area);
+    }
 }
 
 fn draw_list(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
@@ -485,7 +536,13 @@ fn draw_list(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
                 SessionSource::ClaudeCode => ("[CC]", theme::CC_BADGE),
                 SessionSource::OpenCode   => ("[OC]", theme::OC_BADGE),
             };
+            let pin_span = if app.pinned.contains(&s.session_id) {
+                Span::styled("* ", theme::pin_style())
+            } else {
+                Span::raw("  ")
+            };
             let line = Line::from(vec![
+                pin_span,
                 Span::styled(format!("{} ", dt), theme::dim_style()),
                 Span::styled(format!("{} ", badge_text), Style::default().fg(badge_color)),
                 Span::styled(format!("{:<22}", label), Style::default().fg(theme::FG)),
@@ -546,13 +603,14 @@ fn build_preview_content(app: &AppState) -> String {
             };
 
             let generated_line = {
-                let path = match s.source {
-                    SessionSource::ClaudeCode => crate::summary::summary_path(&s.session_id),
-                    SessionSource::OpenCode   => crate::summary::opencode_summary_path(&s.session_id),
-                };
-                match std::fs::metadata(&path).and_then(|m| m.modified()) {
-                    Ok(t) => format!("\n\n─── generated {} ───", format_time(t)),
-                    Err(_) => String::new(),
+                let gat = app.summary_generated_at.lock().unwrap_or_else(|e| e.into_inner());
+                match gat.get(&s.session_id) {
+                    Some(&ts) => {
+                        let t = std::time::UNIX_EPOCH
+                            + std::time::Duration::from_secs(ts as u64);
+                        format!("\n\n─── generated {} ───", format_time(t))
+                    }
+                    None => String::new(),
                 }
             };
 
@@ -588,6 +646,42 @@ fn draw_preview(f: &mut ratatui::Frame, app: &mut AppState, area: Rect, scroll: 
         .wrap(Wrap { trim: false })
         .scroll((scroll, 0));
     f.render_widget(preview, area);
+}
+
+fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    Rect::new(x, y, width.min(area.width), height.min(area.height))
+}
+
+fn draw_pin_popup(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
+    let popup_area = centered_rect(44, 6, area);
+    f.render_widget(Clear, popup_area);
+
+    let (session_name, is_pinned) = app.selected_session().map(|s| {
+        let name = if !s.summary.is_empty() {
+            truncate(&s.summary, 32)
+        } else {
+            truncate(&s.project_name, 32)
+        };
+        (name, app.pinned.contains(&s.session_id))
+    }).unwrap_or_default();
+
+    let action_label = if is_pinned { "Unpin" } else { "Pin  " };
+    let content = format!(
+        "\n  {}\n\n  [p] {}    [Esc] Cancel",
+        session_name, action_label
+    );
+
+    let popup = Paragraph::new(content)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Pin / Unpin  (p) ")
+                .border_style(theme::pin_popup_style()),
+        )
+        .wrap(Wrap { trim: false });
+    f.render_widget(popup, popup_area);
 }
 
 fn format_time(t: std::time::SystemTime) -> String {

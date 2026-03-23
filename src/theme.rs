@@ -57,3 +57,13 @@ pub fn sel_style() -> Style {
 pub fn dim_style() -> Style {
     Style::default().fg(FG_DIM)
 }
+
+/// Pin indicator: magenta + bold
+pub fn pin_style() -> Style {
+    Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)
+}
+
+/// Pin popup border: magenta
+pub fn pin_popup_style() -> Style {
+    Style::default().fg(Color::Magenta)
+}

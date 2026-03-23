@@ -1,4 +1,5 @@
 pub mod sessions;
+pub mod store;
 pub mod summary;
 pub mod tmux;
 pub mod install;

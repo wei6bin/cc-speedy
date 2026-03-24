@@ -205,7 +205,9 @@ async fn run_event_loop(
                         app.focus = if app.focus == Focus::List { Focus::Preview } else { Focus::List };
                     }
 
-                    (AppMode::Normal, _, KeyCode::Down) | (AppMode::Normal, _, KeyCode::Char('j')) => {
+                    (AppMode::Normal, _, KeyCode::Down)
+                    | (AppMode::Normal, _, KeyCode::Char('j'))
+                    | (AppMode::Filter, _, KeyCode::Down) => {
                         if app.focus == Focus::Preview {
                             app.preview_scroll = app.preview_scroll.saturating_add(1);
                         } else {
@@ -218,7 +220,9 @@ async fn run_event_loop(
                             }
                         }
                     }
-                    (AppMode::Normal, _, KeyCode::Up) | (AppMode::Normal, _, KeyCode::Char('k')) => {
+                    (AppMode::Normal, _, KeyCode::Up)
+                    | (AppMode::Normal, _, KeyCode::Char('k'))
+                    | (AppMode::Filter, _, KeyCode::Up) => {
                         if app.focus == Focus::Preview {
                             app.preview_scroll = app.preview_scroll.saturating_sub(1);
                         } else {
@@ -590,6 +594,12 @@ fn build_preview_content(app: &AppState) -> String {
                 .cloned()
                 .unwrap_or(fallback);
 
+            let title_line = if !s.summary.is_empty() {
+                format!("\nTITLE:    {}", s.summary)
+            } else {
+                String::new()
+            };
+
             let branch_line = if !s.git_branch.is_empty() {
                 format!("\nBRANCH:   {}", s.git_branch)
             } else {
@@ -615,10 +625,11 @@ fn build_preview_content(app: &AppState) -> String {
             };
 
             format!(
-                "PROJECT:  {}\nMSGS:     {}  |  {}{}{}\n\n{}{}",
+                "PROJECT:  {}\nMSGS:     {}  |  {}{}{}{}\n\n{}{}",
                 s.project_path,
                 s.message_count,
                 format_time(s.modified),
+                title_line,
                 branch_line,
                 first_msg_line,
                 summary,

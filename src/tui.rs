@@ -282,6 +282,42 @@ async fn run_event_loop(
                         }
                     }
 
+                    // n: new conversation in project folder
+                    (AppMode::Normal, KeyModifiers::NONE, KeyCode::Char('n')) => {
+                        if let Some(s) = app.selected_session() {
+                            let path  = s.project_path.clone();
+                            let title = format!("new:{}", crate::util::path_last_n(&path, 1));
+                            match s.source {
+                                SessionSource::ClaudeCode => {
+                                    let name = crate::tmux::new_cc_session_name(&path);
+                                    return crate::tmux::new_cc_in_tmux(&name, &path, false, &title);
+                                }
+                                SessionSource::OpenCode => {
+                                    let name = crate::tmux::new_oc_session_name(&path);
+                                    return crate::tmux::new_oc_in_tmux(&name, &path, &title);
+                                }
+                            }
+                        }
+                    }
+
+                    // Ctrl+N: new conversation in yolo mode (CC only; OC has no yolo)
+                    (AppMode::Normal, KeyModifiers::CONTROL, KeyCode::Char('n')) => {
+                        if let Some(s) = app.selected_session() {
+                            let path  = s.project_path.clone();
+                            let title = format!("new:{}", crate::util::path_last_n(&path, 1));
+                            match s.source {
+                                SessionSource::ClaudeCode => {
+                                    let name = crate::tmux::new_cc_session_name(&path);
+                                    return crate::tmux::new_cc_in_tmux(&name, &path, true, &title);
+                                }
+                                SessionSource::OpenCode => {
+                                    let name = crate::tmux::new_oc_session_name(&path);
+                                    return crate::tmux::new_oc_in_tmux(&name, &path, &title);
+                                }
+                            }
+                        }
+                    }
+
                     // Ctrl+Y: yolo mode
                     (AppMode::Normal, KeyModifiers::CONTROL, KeyCode::Char('y')) => {
                         if let Some(s) = app.selected_session() {
@@ -508,11 +544,11 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
         if at.elapsed().as_secs() < 2 {
             (msg.as_str(), Style::default().fg(theme::STATUS_OK))
         } else {
-            (" 1:CC  2:OC  0:all  /: filter  Enter: resume  Ctrl+Y: yolo  Tab  j/k  r  c  x: pin  Ctrl+R  q",
+            (" 1:CC  2:OC  0:all  /: filter  Enter: resume  n: new  Ctrl+Y/N: yolo  Tab  j/k  r  c  x: pin  Ctrl+R  q",
              Style::default().fg(theme::STATUS_HELP))
         }
     } else {
-        (" 1:CC  2:OC  0:all  /: filter  Enter: resume  Ctrl+Y: yolo  Tab  j/k  r  c  x: pin  Ctrl+R  q",
+        (" 1:CC  2:OC  0:all  /: filter  Enter: resume  n: new  Ctrl+Y/N: yolo  Tab  j/k  r  c  x: pin  Ctrl+R  q",
          Style::default().fg(theme::STATUS_HELP))
     };
     f.render_widget(Paragraph::new(status_text).style(status_style), chunks[3]);

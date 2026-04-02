@@ -117,6 +117,55 @@ fn resume_in_tmux_with_cmd(
     Ok(())
 }
 
+/// Unique tmux session name for a brand-new CC conversation (timestamp suffix avoids collisions).
+pub fn new_cc_session_name(project_path: &str) -> String {
+    let base = session_name_from_path(project_path);
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    format!("cc-new-{}-{}", base, ts % 100_000)
+        .chars()
+        .take(50)
+        .collect()
+}
+
+/// Unique tmux session name for a brand-new OC conversation.
+pub fn new_oc_session_name(project_path: &str) -> String {
+    let base = session_name_from_path(project_path);
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    format!("oc-new-{}-{}", base, ts % 100_000)
+        .chars()
+        .take(50)
+        .collect()
+}
+
+/// Start a fresh Claude Code conversation (no --resume) in a new tmux session.
+pub fn new_cc_in_tmux(
+    session_name: &str,
+    project_path: &str,
+    yolo: bool,
+    window_title: &str,
+) -> Result<()> {
+    let mut args = vec!["claude"];
+    if yolo {
+        args.push("--dangerously-skip-permissions");
+    }
+    resume_in_tmux_with_cmd(session_name, project_path, window_title, &args)
+}
+
+/// Start a fresh OpenCode conversation (no --session) in a new tmux session.
+pub fn new_oc_in_tmux(
+    session_name: &str,
+    project_path: &str,
+    window_title: &str,
+) -> Result<()> {
+    resume_in_tmux_with_cmd(session_name, project_path, window_title, &["opencode"])
+}
+
 /// Resume a Claude Code session in a named tmux session.
 /// Runs `claude --resume <session_id>` (optionally with `--dangerously-skip-permissions`).
 pub fn resume_in_tmux(

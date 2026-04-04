@@ -273,19 +273,23 @@ async fn run_event_loop(
                             let path  = s.project_path.clone();
                             let id    = s.session_id.clone();
                             let title = window_title_from_session(s);
-                            match s.source {
+                            let result = match s.source {
                                 SessionSource::ClaudeCode => {
                                     let name = crate::tmux::cc_session_name(&path);
-                                    return crate::tmux::resume_in_tmux(&name, &path, &id, false, &title);
+                                    crate::tmux::resume_in_tmux(&name, &path, &id, false, &title)
                                 }
                                 SessionSource::OpenCode => {
                                     let name = crate::tmux::oc_session_name(&path);
-                                    return crate::tmux::resume_opencode_in_tmux(&name, &path, &id, &title);
+                                    crate::tmux::resume_opencode_in_tmux(&name, &path, &id, &title)
                                 }
                                 SessionSource::Copilot => {
                                     let name = crate::tmux::copilot_session_name(&path);
-                                    return crate::tmux::resume_copilot_in_tmux(&name, &path, &id, false, &title);
+                                    crate::tmux::resume_copilot_in_tmux(&name, &path, &id, false, &title)
                                 }
+                            };
+                            match result {
+                                Ok(()) => return Ok(()),
+                                Err(e) => app.status_msg = Some((format!("Resume failed: {e}"), Instant::now())),
                             }
                         }
                     }
@@ -295,19 +299,23 @@ async fn run_event_loop(
                         if let Some(s) = app.selected_session() {
                             let path  = s.project_path.clone();
                             let title = format!("new:{}", crate::util::path_last_n(&path, 1));
-                            match s.source {
+                            let result = match s.source {
                                 SessionSource::ClaudeCode => {
                                     let name = crate::tmux::new_cc_session_name(&path);
-                                    return crate::tmux::new_cc_in_tmux(&name, &path, false, &title);
+                                    crate::tmux::new_cc_in_tmux(&name, &path, false, &title)
                                 }
                                 SessionSource::OpenCode => {
                                     let name = crate::tmux::new_oc_session_name(&path);
-                                    return crate::tmux::new_oc_in_tmux(&name, &path, &title);
+                                    crate::tmux::new_oc_in_tmux(&name, &path, &title)
                                 }
                                 SessionSource::Copilot => {
                                     let name = crate::tmux::new_copilot_session_name(&path);
-                                    return crate::tmux::new_copilot_in_tmux(&name, &path, &title);
+                                    crate::tmux::new_copilot_in_tmux(&name, &path, &title)
                                 }
+                            };
+                            match result {
+                                Ok(()) => return Ok(()),
+                                Err(e) => app.status_msg = Some((format!("Launch failed: {e}"), Instant::now())),
                             }
                         }
                     }
@@ -317,19 +325,23 @@ async fn run_event_loop(
                         if let Some(s) = app.selected_session() {
                             let path  = s.project_path.clone();
                             let title = format!("new:{}", crate::util::path_last_n(&path, 1));
-                            match s.source {
+                            let result = match s.source {
                                 SessionSource::ClaudeCode => {
                                     let name = crate::tmux::new_cc_session_name(&path);
-                                    return crate::tmux::new_cc_in_tmux(&name, &path, true, &title);
+                                    crate::tmux::new_cc_in_tmux(&name, &path, true, &title)
                                 }
                                 SessionSource::OpenCode => {
                                     let name = crate::tmux::new_oc_session_name(&path);
-                                    return crate::tmux::new_oc_in_tmux(&name, &path, &title);
+                                    crate::tmux::new_oc_in_tmux(&name, &path, &title)
                                 }
                                 SessionSource::Copilot => {
                                     let name = crate::tmux::new_copilot_session_name(&path);
-                                    return crate::tmux::new_copilot_in_tmux(&name, &path, &title);
+                                    crate::tmux::new_copilot_in_tmux(&name, &path, &title)
                                 }
+                            };
+                            match result {
+                                Ok(()) => return Ok(()),
+                                Err(e) => app.status_msg = Some((format!("Launch failed: {e}"), Instant::now())),
                             }
                         }
                     }
@@ -340,20 +352,24 @@ async fn run_event_loop(
                             let path  = s.project_path.clone();
                             let id    = s.session_id.clone();
                             let title = window_title_from_session(s);
-                            match s.source {
+                            let result = match s.source {
                                 SessionSource::ClaudeCode => {
                                     let name = crate::tmux::cc_session_name(&path);
-                                    return crate::tmux::resume_in_tmux(&name, &path, &id, true, &title);
+                                    crate::tmux::resume_in_tmux(&name, &path, &id, true, &title)
                                 }
                                 SessionSource::OpenCode => {
                                     // OpenCode has no --dangerously-skip-permissions; fall back to normal resume
                                     let name = crate::tmux::oc_session_name(&path);
-                                    return crate::tmux::resume_opencode_in_tmux(&name, &path, &id, &title);
+                                    crate::tmux::resume_opencode_in_tmux(&name, &path, &id, &title)
                                 }
                                 SessionSource::Copilot => {
                                     let name = crate::tmux::copilot_session_name(&path);
-                                    return crate::tmux::resume_copilot_in_tmux(&name, &path, &id, true, &title);
+                                    crate::tmux::resume_copilot_in_tmux(&name, &path, &id, true, &title)
                                 }
+                            };
+                            match result {
+                                Ok(()) => return Ok(()),
+                                Err(e) => app.status_msg = Some((format!("Resume failed: {e}"), Instant::now())),
                             }
                         }
                     }

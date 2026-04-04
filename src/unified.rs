@@ -21,7 +21,7 @@ pub struct UnifiedSession {
     pub summary:       String,
     pub git_branch:    String,
     pub source:        SessionSource,
-    /// Some(path) for Claude Code sessions; None for OpenCode sessions.
+    /// Some(path) for Claude Code sessions; None for OpenCode and Copilot sessions.
     pub jsonl_path:    Option<String>,
 }
 
@@ -42,7 +42,7 @@ impl From<Session> for UnifiedSession {
     }
 }
 
-/// Merge Claude Code and OpenCode sessions into a single list sorted by recency.
+/// Merge Claude Code, OpenCode, and Copilot sessions into a single list sorted by recency.
 pub fn list_all_sessions() -> Result<Vec<UnifiedSession>> {
     let cc = list_sessions()
         .unwrap_or_default()

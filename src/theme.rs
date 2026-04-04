@@ -25,6 +25,7 @@ pub const SEL_FG: Color = Color::Rgb(255, 255, 255); // #ffffff
 // ── Badges ───────────────────────────────────────────────────────────
 pub const CC_BADGE: Color = Color::Rgb(13, 131, 0);   // #0d8300  muted btop green
 pub const OC_BADGE: Color = Color::Rgb(30, 144, 255); // #1e90ff  btop blue
+pub const CO_BADGE: Color = Color::Rgb(255, 140, 0);  // #ff8c00  orange
 
 // ── Jobs panel content text ───────────────────────────────────────────
 pub const JOBS_FG: Color = Color::Rgb(212, 160, 23);  // #d4a017  warm amber

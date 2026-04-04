@@ -51,8 +51,9 @@ pub fn list_all_sessions() -> Result<Vec<UnifiedSession>> {
         .collect::<Vec<_>>();
 
     let oc = list_opencode_sessions().unwrap_or_default();
+    let co = crate::copilot_sessions::list_copilot_sessions().unwrap_or_default();
 
-    let mut all: Vec<UnifiedSession> = cc.into_iter().chain(oc).collect();
+    let mut all: Vec<UnifiedSession> = cc.into_iter().chain(oc).chain(co).collect();
     all.sort_by(|a, b| b.modified.cmp(&a.modified));
     Ok(all)
 }

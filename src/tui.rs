@@ -259,6 +259,10 @@ async fn run_event_loop(
                         app.source_filter = Some(SessionSource::OpenCode);
                         app.apply_filter();
                     }
+                    (AppMode::Normal, KeyModifiers::NONE, KeyCode::Char('3')) => {
+                        app.source_filter = Some(SessionSource::Copilot);
+                        app.apply_filter();
+                    }
                     (AppMode::Normal, KeyModifiers::NONE, KeyCode::Char('0')) => {
                         app.source_filter = None;
                         app.apply_filter();
@@ -279,9 +283,8 @@ async fn run_event_loop(
                                     return crate::tmux::resume_opencode_in_tmux(&name, &path, &id, &title);
                                 }
                                 SessionSource::Copilot => {
-                                    // TODO(Task 5): replace with copilot tmux fn
-                                    let name = crate::tmux::oc_session_name(&path);
-                                    return crate::tmux::resume_opencode_in_tmux(&name, &path, &id, &title);
+                                    let name = crate::tmux::copilot_session_name(&path);
+                                    return crate::tmux::resume_copilot_in_tmux(&name, &path, &id, false, &title);
                                 }
                             }
                         }
@@ -302,9 +305,8 @@ async fn run_event_loop(
                                     return crate::tmux::new_oc_in_tmux(&name, &path, &title);
                                 }
                                 SessionSource::Copilot => {
-                                    // TODO(Task 5): replace with copilot tmux fn
-                                    let name = crate::tmux::new_oc_session_name(&path);
-                                    return crate::tmux::new_oc_in_tmux(&name, &path, &title);
+                                    let name = crate::tmux::new_copilot_session_name(&path);
+                                    return crate::tmux::new_copilot_in_tmux(&name, &path, &title);
                                 }
                             }
                         }
@@ -325,9 +327,8 @@ async fn run_event_loop(
                                     return crate::tmux::new_oc_in_tmux(&name, &path, &title);
                                 }
                                 SessionSource::Copilot => {
-                                    // TODO(Task 5): replace with copilot tmux fn
-                                    let name = crate::tmux::new_oc_session_name(&path);
-                                    return crate::tmux::new_oc_in_tmux(&name, &path, &title);
+                                    let name = crate::tmux::new_copilot_session_name(&path);
+                                    return crate::tmux::new_copilot_in_tmux(&name, &path, &title);
                                 }
                             }
                         }
@@ -350,10 +351,8 @@ async fn run_event_loop(
                                     return crate::tmux::resume_opencode_in_tmux(&name, &path, &id, &title);
                                 }
                                 SessionSource::Copilot => {
-                                    // TODO(Task 5): replace with copilot tmux fn
-                                    // Copilot has no yolo mode; fall back to normal resume
-                                    let name = crate::tmux::oc_session_name(&path);
-                                    return crate::tmux::resume_opencode_in_tmux(&name, &path, &id, &title);
+                                    let name = crate::tmux::copilot_session_name(&path);
+                                    return crate::tmux::resume_copilot_in_tmux(&name, &path, &id, true, &title);
                                 }
                             }
                         }
@@ -452,7 +451,7 @@ fn spawn_summary_generation(
             let src_str = match source {
                 SessionSource::ClaudeCode => "cc",
                 SessionSource::OpenCode   => "oc",
-                SessionSource::Copilot    => "cp",
+                SessionSource::Copilot    => "co",
             };
             match crate::summary::generate_summary(&msgs).await {
                 Ok(text) => {
@@ -572,11 +571,11 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
         if at.elapsed().as_secs() < 2 {
             (msg.as_str(), Style::default().fg(theme::STATUS_OK))
         } else {
-            (" 1:CC  2:OC  0:all  /: filter  Enter: resume  n: new  Ctrl+Y/N: yolo  Tab  j/k  r  c  x: pin  Ctrl+R  q",
+            (" 1:CC  2:OC  3:CO  0:all  /: filter  Enter: resume  n: new  Ctrl+Y/N: yolo  Tab  j/k  r  c  x: pin  Ctrl+R  q",
              Style::default().fg(theme::STATUS_HELP))
         }
     } else {
-        (" 1:CC  2:OC  0:all  /: filter  Enter: resume  n: new  Ctrl+Y/N: yolo  Tab  j/k  r  c  x: pin  Ctrl+R  q",
+        (" 1:CC  2:OC  3:CO  0:all  /: filter  Enter: resume  n: new  Ctrl+Y/N: yolo  Tab  j/k  r  c  x: pin  Ctrl+R  q",
          Style::default().fg(theme::STATUS_HELP))
     };
     f.render_widget(Paragraph::new(status_text).style(status_style), chunks[3]);
@@ -603,7 +602,7 @@ fn draw_list(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
             let (badge_text, badge_color) = match s.source {
                 SessionSource::ClaudeCode => ("[CC]", theme::CC_BADGE),
                 SessionSource::OpenCode   => ("[OC]", theme::OC_BADGE),
-                SessionSource::Copilot    => ("[CP]", theme::OC_BADGE),
+                SessionSource::Copilot    => ("[CO]", theme::CO_BADGE),
             };
             let pin_span = if app.pinned.contains(&s.session_id) {
                 Span::styled("* ", theme::pin_style())

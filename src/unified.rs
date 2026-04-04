@@ -7,6 +7,7 @@ use crate::opencode_sessions::list_opencode_sessions;
 pub enum SessionSource {
     ClaudeCode,
     OpenCode,
+    Copilot,
 }
 
 #[derive(Debug, Clone)]

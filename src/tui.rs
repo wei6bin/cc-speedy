@@ -278,6 +278,10 @@ async fn run_event_loop(
                                     let name = crate::tmux::oc_session_name(&path);
                                     return crate::tmux::resume_opencode_in_tmux(&name, &path, &id, &title);
                                 }
+                                SessionSource::Copilot => {
+                                    let name = crate::tmux::oc_session_name(&path);
+                                    return crate::tmux::resume_opencode_in_tmux(&name, &path, &id, &title);
+                                }
                             }
                         }
                     }
@@ -293,6 +297,10 @@ async fn run_event_loop(
                                     return crate::tmux::new_cc_in_tmux(&name, &path, false, &title);
                                 }
                                 SessionSource::OpenCode => {
+                                    let name = crate::tmux::new_oc_session_name(&path);
+                                    return crate::tmux::new_oc_in_tmux(&name, &path, &title);
+                                }
+                                SessionSource::Copilot => {
                                     let name = crate::tmux::new_oc_session_name(&path);
                                     return crate::tmux::new_oc_in_tmux(&name, &path, &title);
                                 }
@@ -314,6 +322,10 @@ async fn run_event_loop(
                                     let name = crate::tmux::new_oc_session_name(&path);
                                     return crate::tmux::new_oc_in_tmux(&name, &path, &title);
                                 }
+                                SessionSource::Copilot => {
+                                    let name = crate::tmux::new_oc_session_name(&path);
+                                    return crate::tmux::new_oc_in_tmux(&name, &path, &title);
+                                }
                             }
                         }
                     }
@@ -331,6 +343,11 @@ async fn run_event_loop(
                                 }
                                 SessionSource::OpenCode => {
                                     // OpenCode has no --dangerously-skip-permissions; fall back to normal resume
+                                    let name = crate::tmux::oc_session_name(&path);
+                                    return crate::tmux::resume_opencode_in_tmux(&name, &path, &id, &title);
+                                }
+                                SessionSource::Copilot => {
+                                    // Copilot has no yolo mode; fall back to normal resume
                                     let name = crate::tmux::oc_session_name(&path);
                                     return crate::tmux::resume_opencode_in_tmux(&name, &path, &id, &title);
                                 }
@@ -419,12 +436,19 @@ fn spawn_summary_generation(
                     crate::opencode_sessions::parse_opencode_messages(&session_id)
                 }).await.ok().and_then(|r| r.ok())
             }
+            SessionSource::Copilot => {
+                let session_id = id.clone();
+                tokio::task::spawn_blocking(move || {
+                    crate::copilot_sessions::parse_copilot_messages(&session_id)
+                }).await.ok().and_then(|r| r.ok())
+            }
         };
 
         if let Some(msgs) = msgs {
             let src_str = match source {
                 SessionSource::ClaudeCode => "cc",
                 SessionSource::OpenCode   => "oc",
+                SessionSource::Copilot    => "cp",
             };
             match crate::summary::generate_summary(&msgs).await {
                 Ok(text) => {
@@ -575,6 +599,7 @@ fn draw_list(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
             let (badge_text, badge_color) = match s.source {
                 SessionSource::ClaudeCode => ("[CC]", theme::CC_BADGE),
                 SessionSource::OpenCode   => ("[OC]", theme::OC_BADGE),
+                SessionSource::Copilot    => ("[CP]", theme::OC_BADGE),
             };
             let pin_span = if app.pinned.contains(&s.session_id) {
                 Span::styled("* ", theme::pin_style())

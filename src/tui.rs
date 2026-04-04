@@ -279,6 +279,7 @@ async fn run_event_loop(
                                     return crate::tmux::resume_opencode_in_tmux(&name, &path, &id, &title);
                                 }
                                 SessionSource::Copilot => {
+                                    // TODO(Task 5): replace with copilot tmux fn
                                     let name = crate::tmux::oc_session_name(&path);
                                     return crate::tmux::resume_opencode_in_tmux(&name, &path, &id, &title);
                                 }
@@ -301,6 +302,7 @@ async fn run_event_loop(
                                     return crate::tmux::new_oc_in_tmux(&name, &path, &title);
                                 }
                                 SessionSource::Copilot => {
+                                    // TODO(Task 5): replace with copilot tmux fn
                                     let name = crate::tmux::new_oc_session_name(&path);
                                     return crate::tmux::new_oc_in_tmux(&name, &path, &title);
                                 }
@@ -323,6 +325,7 @@ async fn run_event_loop(
                                     return crate::tmux::new_oc_in_tmux(&name, &path, &title);
                                 }
                                 SessionSource::Copilot => {
+                                    // TODO(Task 5): replace with copilot tmux fn
                                     let name = crate::tmux::new_oc_session_name(&path);
                                     return crate::tmux::new_oc_in_tmux(&name, &path, &title);
                                 }
@@ -347,6 +350,7 @@ async fn run_event_loop(
                                     return crate::tmux::resume_opencode_in_tmux(&name, &path, &id, &title);
                                 }
                                 SessionSource::Copilot => {
+                                    // TODO(Task 5): replace with copilot tmux fn
                                     // Copilot has no yolo mode; fall back to normal resume
                                     let name = crate::tmux::oc_session_name(&path);
                                     return crate::tmux::resume_opencode_in_tmux(&name, &path, &id, &title);
@@ -409,7 +413,7 @@ async fn run_event_loop(
 
 fn spawn_summary_generation(
     id: String,
-    jsonl: Option<String>,   // Some for CC sessions, None for OC sessions
+    jsonl: Option<String>,   // Some for CC sessions, None for OC/Copilot sessions
     source: SessionSource,
     summaries: Arc<Mutex<std::collections::HashMap<String, String>>>,
     summary_generated_at: Arc<Mutex<std::collections::HashMap<String, i64>>>,

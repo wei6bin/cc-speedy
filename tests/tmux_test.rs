@@ -85,7 +85,7 @@ fn test_pin_window_title_sets_and_locks_name() {
     assert!(ar_value.contains("off"), "automatic-rename should be 'off', got '{}'", ar_value);
 }
 
-use cc_speedy::tmux::{cc_session_name, oc_session_name};
+use cc_speedy::tmux::{cc_session_name, oc_session_name, copilot_session_name};
 
 #[test]
 fn test_cc_session_name_has_prefix() {
@@ -110,5 +110,18 @@ fn test_cc_session_name_max_50_chars() {
 fn test_oc_session_name_max_50_chars() {
     let long = "/a/b/c/this-is-a-very-long-project-directory-name-that-exceeds-limits";
     assert!(oc_session_name(long).len() <= 50);
+}
+
+#[test]
+fn test_copilot_session_name_has_co_prefix() {
+    let name = copilot_session_name("/home/user/ai/myproj");
+    assert!(name.starts_with("co-"), "expected co- prefix, got: {}", name);
+    assert!(name.contains("ai"), "expected path segment in name: {}", name);
+}
+
+#[test]
+fn test_copilot_session_name_max_50_chars() {
+    let long = "/a/b/c/this-is-a-very-long-project-directory-name-that-exceeds-limits";
+    assert!(copilot_session_name(long).len() <= 50);
 }
 

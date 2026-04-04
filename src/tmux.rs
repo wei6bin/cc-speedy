@@ -197,3 +197,49 @@ pub fn resume_opencode_in_tmux(
         &["opencode", "--session", session_id],
     )
 }
+
+/// Tmux session name for a Copilot session: "co-<last-2-path-segments>", max 50 chars.
+pub fn copilot_session_name(project_path: &str) -> String {
+    let base = session_name_from_path(project_path);
+    format!("co-{}", base).chars().take(50).collect()
+}
+
+/// Unique tmux session name for a brand-new Copilot conversation.
+pub fn new_copilot_session_name(project_path: &str) -> String {
+    let base = session_name_from_path(project_path);
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    format!("co-new-{}-{}", base, ts % 100_000)
+        .chars()
+        .take(50)
+        .collect()
+}
+
+/// Resume a Copilot session in a named tmux session.
+/// `yolo = true` adds `--allow-all` (Copilot's equivalent of --dangerously-skip-permissions).
+pub fn resume_copilot_in_tmux(
+    session_name: &str,
+    project_path: &str,
+    session_id: &str,
+    yolo: bool,
+    window_title: &str,
+) -> Result<()> {
+    let resume_arg = format!("--resume={}", session_id);
+    let mut args = vec!["copilot"];
+    if yolo {
+        args.push("--allow-all");
+    }
+    args.push(&resume_arg);
+    resume_in_tmux_with_cmd(session_name, project_path, window_title, &args)
+}
+
+/// Start a fresh Copilot conversation in a new tmux session.
+pub fn new_copilot_in_tmux(
+    session_name: &str,
+    project_path: &str,
+    window_title: &str,
+) -> Result<()> {
+    resume_in_tmux_with_cmd(session_name, project_path, window_title, &["copilot"])
+}

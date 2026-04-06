@@ -680,6 +680,12 @@ fn build_preview_content(app: &AppState) -> String {
                 String::new()
             };
 
+            let file_line = if let Some(ref p) = s.jsonl_path {
+                format!("\nFILE:     {}", p)
+            } else {
+                String::new()
+            };
+
             let branch_line = if !s.git_branch.is_empty() {
                 format!("\nBRANCH:   {}", s.git_branch)
             } else {
@@ -705,8 +711,9 @@ fn build_preview_content(app: &AppState) -> String {
             };
 
             format!(
-                "PROJECT:  {}\nMSGS:     {}  |  {}{}{}{}\n\n{}{}",
+                "PROJECT:  {}{}\nMSGS:     {}  |  {}{}{}{}\n\n{}{}",
                 s.project_path,
+                file_line,
                 s.message_count,
                 format_time(s.modified),
                 title_line,

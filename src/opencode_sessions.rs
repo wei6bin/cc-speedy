@@ -151,7 +151,7 @@ pub fn query_sessions_from_conn(conn: &Connection) -> Result<Vec<UnifiedSession>
             summary:       title,
             git_branch:    String::new(),
             source:        SessionSource::OpenCode,
-            jsonl_path:    None,
+            jsonl_path:    opencode_db_path().map(|p| p.to_string_lossy().into_owned()),
         });
     }
     Ok(sessions)

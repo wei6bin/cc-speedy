@@ -122,7 +122,7 @@ pub fn list_copilot_sessions_from_dir(base: &Path) -> Result<Vec<UnifiedSession>
             summary:       title,
             git_branch:    ws.branch.unwrap_or_default(),
             source:        SessionSource::Copilot,
-            jsonl_path:    None,
+            jsonl_path:    Some(path.join("events.jsonl").to_string_lossy().into_owned()),
         });
     }
     Ok(sessions)

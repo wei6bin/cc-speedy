@@ -34,8 +34,8 @@ fn test_export_writes_markdown_file() {
         .collect();
     assert_eq!(files.len(), 1);
     let content = std::fs::read_to_string(files[0].path()).unwrap();
-    assert!(content.contains("session_id: abc12345-test"));
-    assert!(content.contains("project: /home/user/ai/cc-speedy"));
+    assert!(content.contains("session_id: \"abc12345-test\""));
+    assert!(content.contains("project: \"/home/user/ai/cc-speedy\""));
     assert!(content.contains("tags: [agent-session]"));
     assert!(content.contains("## What was done"));
     assert!(content.contains("## Decision points"));

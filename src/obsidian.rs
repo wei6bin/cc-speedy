@@ -35,10 +35,10 @@ pub fn export_to_obsidian(
     let file_path = std::path::Path::new(vault_path).join(&filename);
 
     let front_matter = format!(
-        "---\ndate: {}\nproject: {}\nsession_id: {}\ntags: [agent-session]\n---\n\n",
+        "---\ndate: {}\nproject: \"{}\"\nsession_id: \"{}\"\ntags: [agent-session]\n---\n\n",
         date_str,
-        session.project_path,
-        session.session_id,
+        session.project_path.replace('"', "\\\""),
+        session.session_id.replace('"', "\\\""),
     );
 
     let mut content = format!("{}{}", front_matter, factual);

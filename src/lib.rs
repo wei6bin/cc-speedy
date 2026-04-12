@@ -10,3 +10,4 @@ pub mod copilot_sessions;
 pub mod util;
 pub mod theme;
 pub mod obsidian;
+pub mod settings;

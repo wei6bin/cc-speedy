@@ -469,8 +469,8 @@ fn spawn_summary_generation(
                 SessionSource::OpenCode   => "oc",
                 SessionSource::Copilot    => "co",
             };
-            match crate::summary::generate_summary(&msgs).await {
-                Ok(text) => {
+            match crate::summary::generate_summary(&msgs, &[]).await {
+                Ok((text, _new_points)) => {
                     let ts = crate::store::save_summary(
                         &db.lock().unwrap_or_else(|e| e.into_inner()),
                         &id, src_str, &text,

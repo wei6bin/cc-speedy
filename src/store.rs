@@ -4,6 +4,12 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[derive(Debug, Clone)]
+pub struct LearningPoint {
+    pub category: String,  // "decision_points" | "lessons_gotchas" | "tools_commands"
+    pub point:    String,
+}
+
 pub fn db_path() -> PathBuf {
     dirs::data_local_dir()
         .expect("data_local_dir must be set")
@@ -28,6 +34,18 @@ pub fn open_db() -> Result<Connection> {
          CREATE TABLE IF NOT EXISTS pinned (
              session_id TEXT PRIMARY KEY,
              pinned_at  INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+         );
+         CREATE TABLE IF NOT EXISTS learnings (
+             id          INTEGER PRIMARY KEY AUTOINCREMENT,
+             session_id  TEXT    NOT NULL,
+             category    TEXT    NOT NULL,
+             point       TEXT    NOT NULL,
+             captured_at INTEGER NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS learnings_session ON learnings (session_id);
+         CREATE TABLE IF NOT EXISTS settings (
+             key   TEXT PRIMARY KEY,
+             value TEXT NOT NULL
          );",
     )?;
     Ok(conn)
@@ -173,4 +191,53 @@ fn mtime_as_secs(path: &std::path::Path) -> i64 {
                 .unwrap_or_default()
                 .as_secs() as i64
         })
+}
+
+/// Append new learning points for a session. Existing rows are never deleted.
+pub fn save_learnings(conn: &Connection, session_id: &str, points: &[LearningPoint]) -> Result<()> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    for p in points {
+        conn.execute(
+            "INSERT INTO learnings (session_id, category, point, captured_at) VALUES (?1, ?2, ?3, ?4)",
+            params![session_id, p.category, p.point, now],
+        )?;
+    }
+    Ok(())
+}
+
+/// Load all accumulated learning points for a session, ordered by capture time.
+pub fn load_learnings(conn: &Connection, session_id: &str) -> Result<Vec<LearningPoint>> {
+    let mut stmt = conn.prepare(
+        "SELECT category, point FROM learnings WHERE session_id = ?1 ORDER BY captured_at, id",
+    )?;
+    let points = stmt
+        .query_map(params![session_id], |row| {
+            Ok(LearningPoint {
+                category: row.get(0)?,
+                point:    row.get(1)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(points)
+}
+
+pub fn get_setting(conn: &Connection, key: &str) -> Option<String> {
+    conn.query_row(
+        "SELECT value FROM settings WHERE key = ?1",
+        params![key],
+        |r| r.get::<_, String>(0),
+    ).ok()
+}
+
+pub fn set_setting(conn: &Connection, key: &str, value: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    )?;
+    Ok(())
 }

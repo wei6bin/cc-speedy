@@ -30,24 +30,56 @@ pub fn write_summary(path: &Path, content: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn generate_summary(messages: &[Message]) -> Result<String> {
-    // Take last 50 messages, format as conversation snippet
+pub async fn generate_summary(
+    messages: &[Message],
+    existing_learnings: &[crate::store::LearningPoint],
+) -> Result<(String, Vec<crate::store::LearningPoint>)> {
+    // Take last 50 messages
     let snippet: String = messages.iter().rev().take(50).rev()
         .map(|m| format!("{}: {}", m.role, m.text.chars().take(200).collect::<String>()))
         .collect::<Vec<_>>()
         .join("\n");
 
+    // Format existing learnings so Claude knows what's already captured
+    let existing_text = if existing_learnings.is_empty() {
+        "(none)".to_string()
+    } else {
+        existing_learnings.iter()
+            .map(|l| format!("[{}] {}", l.category, l.point))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
     let prompt = format!(
-        "Summarize this AI coding session in 3-5 bullet points.\n\
-        Focus on: what was asked, what was done, files changed, final status.\n\
-        Output markdown with ONLY these sections:\n\
-        ## What was done\n- bullet\n\n## Files changed\n- file (or \"none\")\n\n## Status\nCompleted/In progress\n\n\
+        "Analyze this AI coding session and produce exactly two sections separated by the delimiter <!-- LEARNINGS -->.\n\
+        \n\
+        SECTION 1 — output these headings and bullets only:\n\
+        ## What was done\n- bullet (3-5 bullets max)\n\
+        \n\
+        ## Files changed\n- file path (or \"none\")\n\
+        \n\
+        ## Status\nCompleted / In progress\n\
+        \n\
+        ## Problem context\n1-2 sentences on what problem was being solved and why\n\
+        \n\
+        ## Approach taken\nKey steps and decisions (2-4 bullets)\n\
+        \n\
+        <!-- LEARNINGS -->\n\
+        \n\
+        SECTION 2 — extract ONLY points not already in EXISTING LEARNINGS below:\n\
+        ## Decision points\n- technical design choice: brief rationale (or \"none\")\n\
+        \n\
+        ## Lessons & gotchas\n- surprise, pitfall, or thing to do differently (or \"none\")\n\
+        \n\
+        ## Tools & commands discovered\n- CLI flag/library/API found (or \"none\")\n\
+        \n\
+        EXISTING LEARNINGS (do not repeat these):\n\
+        {}\n\
+        \n\
         Conversation:\n{}",
-        snippet
+        existing_text, snippet
     );
 
-    // Use `claude -p` (non-interactive) so no separate API key is needed.
-    // Enforce a 60-second timeout so a hung process doesn't stall the TUI forever.
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(60),
         tokio::process::Command::new("claude")
@@ -65,8 +97,16 @@ pub async fn generate_summary(messages: &[Message]) -> Result<String> {
 
     let text = String::from_utf8(output.stdout)
         .map_err(|e| anyhow::anyhow!("claude output was not valid UTF-8: {}", e))?;
+    let text = text.trim();
 
-    Ok(text.trim().to_string())
+    // Split on the delimiter — graceful degradation if missing
+    let (factual, learning_md) = match text.split_once("<!-- LEARNINGS -->") {
+        Some((f, l)) => (f.trim().to_string(), l.trim().to_string()),
+        None => (text.to_string(), String::new()),
+    };
+
+    let new_points = parse_learning_output(&learning_md);
+    Ok((factual, new_points))
 }
 
 pub async fn run_hook() -> Result<()> {
@@ -102,8 +142,8 @@ pub async fn run_hook() -> Result<()> {
     };
 
     let messages = crate::sessions::parse_messages(std::path::Path::new(&jsonl_path))?;
-    let summary = generate_summary(&messages).await?;
-    crate::store::save_summary(&conn, &session_id, "cc", &summary)?;
+    let (summary_text, _new_points) = generate_summary(&messages, &[]).await?;
+    crate::store::save_summary(&conn, &session_id, "cc", &summary_text)?;
     eprintln!("cc-speedy: summary saved to db for session {}", session_id);
     Ok(())
 }
@@ -118,6 +158,68 @@ pub fn find_jsonl(session_id: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Parse the learning section of the enriched prompt output into structured points.
+/// Recognises headings "## Decision points", "## Lessons & gotchas", "## Tools & commands discovered".
+/// Bullets containing only "none" (case-insensitive) are skipped.
+pub fn parse_learning_output(learning_md: &str) -> Vec<crate::store::LearningPoint> {
+    let mut points = Vec::new();
+    let mut current_category: Option<&'static str> = None;
+
+    for line in learning_md.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("## ") {
+            let heading = trimmed.trim_start_matches("## ").to_lowercase();
+            current_category = match heading.as_str() {
+                "decision points" | "decision_points" => Some("decision_points"),
+                "lessons & gotchas" | "lessons_&_gotchas" | "lessons and gotchas" => Some("lessons_gotchas"),
+                "tools & commands discovered" | "tools_&_commands_discovered" | "tools and commands discovered" => Some("tools_commands"),
+                _ => None,
+            };
+        } else if trimmed.starts_with("- ") {
+            if let Some(cat) = current_category {
+                let point = trimmed.trim_start_matches("- ").trim().to_string();
+                if !point.is_empty() && point.to_lowercase() != "none" {
+                    points.push(crate::store::LearningPoint { category: cat.to_string(), point });
+                }
+            }
+        }
+    }
+    points
+}
+
+/// Build the combined display string for the TUI preview pane:
+/// factual summary first, then accumulated learning points grouped by category.
+pub fn build_combined_display(factual: &str, learnings: &[crate::store::LearningPoint]) -> String {
+    if learnings.is_empty() {
+        return factual.to_string();
+    }
+
+    let mut out = String::from(factual);
+    out.push_str("\n\n── Knowledge Capture ──────────────────────");
+
+    let categories = [
+        ("decision_points",  "## Decision points"),
+        ("lessons_gotchas",  "## Lessons & gotchas"),
+        ("tools_commands",   "## Tools & commands discovered"),
+    ];
+
+    for (cat, heading) in &categories {
+        let items: Vec<&str> = learnings.iter()
+            .filter(|l| l.category == *cat)
+            .map(|l| l.point.as_str())
+            .collect();
+        if !items.is_empty() {
+            out.push('\n');
+            out.push_str(heading);
+            for item in items {
+                out.push_str("\n- ");
+                out.push_str(item);
+            }
+        }
+    }
+    out
 }
 
 /// Path for OpenCode session summaries.

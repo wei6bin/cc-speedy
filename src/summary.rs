@@ -30,13 +30,53 @@ pub fn write_summary(path: &Path, content: &str) -> Result<()> {
     Ok(())
 }
 
+/// Strip `[📷 filename]` and similar attachment reference tokens from message text.
+/// The Claude CLI interprets `[emoji path]` as a file-read request, which hangs
+/// indefinitely in non-interactive mode. We keep the text that follows the `]`.
+fn strip_attachment_refs(text: &str) -> String {
+    let mut result = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '[' {
+            // Collect the bracket contents to check if it looks like an attachment
+            let mut inner = String::new();
+            let mut closed = false;
+            for ch in chars.by_ref() {
+                if ch == ']' { closed = true; break; }
+                inner.push(ch);
+            }
+            // Heuristic: attachment refs contain an emoji and a filename (has a '.')
+            let looks_like_attachment = closed
+                && inner.chars().next().map(|c| !c.is_alphanumeric()).unwrap_or(false)
+                && inner.contains('.');
+            if !looks_like_attachment {
+                result.push('[');
+                result.push_str(&inner);
+                if closed { result.push(']'); }
+            }
+            // Either way, skip the leading space after the `]` if present
+            if closed && looks_like_attachment {
+                if chars.peek() == Some(&' ') { chars.next(); }
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
 pub async fn generate_summary(
     messages: &[Message],
     existing_learnings: &[crate::store::LearningPoint],
 ) -> Result<(String, Vec<crate::store::LearningPoint>)> {
-    // Take last 50 messages
+    // Take last 50 messages. Strip [📷 file] attachment refs first — when included
+    // verbatim in a `claude --print` prompt they cause the CLI to attempt file reads,
+    // which hangs indefinitely in non-interactive mode (e.g. Copilot sessions).
     let snippet: String = messages.iter().rev().take(50).rev()
-        .map(|m| format!("{}: {}", m.role, m.text.chars().take(200).collect::<String>()))
+        .map(|m| {
+            let text = strip_attachment_refs(&m.text).chars().take(200).collect::<String>();
+            format!("{}: {}", m.role, text)
+        })
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -92,7 +132,15 @@ pub async fn generate_summary(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("claude --print failed: {}", stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let detail = if !stderr.trim().is_empty() {
+            stderr.to_string()
+        } else if !stdout.trim().is_empty() {
+            stdout.to_string()
+        } else {
+            format!("exit code {:?}", output.status.code())
+        };
+        anyhow::bail!("claude --print failed: {}", detail);
     }
 
     let text = String::from_utf8(output.stdout)

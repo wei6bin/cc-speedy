@@ -2,6 +2,17 @@ use cc_speedy::summary::{parse_learning_output, build_combined_display};
 use cc_speedy::store::LearningPoint;
 
 #[test]
+fn test_parse_learning_output_handles_trailing_colon_heading() {
+    let md = "\
+## Decision points:
+- chose async over sync: better throughput
+";
+    let points = parse_learning_output(md);
+    assert_eq!(points.len(), 1);
+    assert_eq!(points[0].category, "decision_points");
+}
+
+#[test]
 fn test_parse_learning_output_extracts_bullets() {
     let md = "\
 ## Decision points

@@ -53,7 +53,7 @@ pub async fn generate_summary(
     let prompt = format!(
         "Analyze this AI coding session and produce exactly two sections separated by the delimiter <!-- LEARNINGS -->.\n\
         \n\
-        SECTION 1 — output these headings and bullets only:\n\
+        <INSTRUCTIONS: output these exact headings and bullets only — do not reproduce this instruction line>\n\
         ## What was done\n- bullet (3-5 bullets max)\n\
         \n\
         ## Files changed\n- file path (or \"none\")\n\
@@ -66,7 +66,7 @@ pub async fn generate_summary(
         \n\
         <!-- LEARNINGS -->\n\
         \n\
-        SECTION 2 — extract ONLY points not already in EXISTING LEARNINGS below:\n\
+        <INSTRUCTIONS: extract ONLY new points not already listed in EXISTING LEARNINGS — do not reproduce this instruction line>\n\
         ## Decision points\n- technical design choice: brief rationale (or \"none\")\n\
         \n\
         ## Lessons & gotchas\n- surprise, pitfall, or thing to do differently (or \"none\")\n\
@@ -170,7 +170,7 @@ pub fn parse_learning_output(learning_md: &str) -> Vec<crate::store::LearningPoi
     for line in learning_md.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with("## ") {
-            let heading = trimmed.trim_start_matches("## ").to_lowercase();
+            let heading = trimmed.trim_start_matches("## ").trim_end_matches(':').to_lowercase();
             current_category = match heading.as_str() {
                 "decision points" | "decision_points" => Some("decision_points"),
                 "lessons & gotchas" | "lessons_&_gotchas" | "lessons and gotchas" => Some("lessons_gotchas"),
@@ -180,7 +180,7 @@ pub fn parse_learning_output(learning_md: &str) -> Vec<crate::store::LearningPoi
         } else if trimmed.starts_with("- ") {
             if let Some(cat) = current_category {
                 let point = trimmed.trim_start_matches("- ").trim().to_string();
-                if !point.is_empty() && point.to_lowercase() != "none" {
+                if !point.is_empty() && !point.to_lowercase().trim_matches(|c| c == '(' || c == ')').trim().eq("none") {
                     points.push(crate::store::LearningPoint { category: cat.to_string(), point });
                 }
             }

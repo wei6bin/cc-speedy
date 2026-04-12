@@ -68,3 +68,11 @@ fn test_set_setting_overwrites() {
     set_setting(&conn, "obsidian_kb_path", "/tmp/new").unwrap();
     assert_eq!(get_setting(&conn, "obsidian_kb_path").as_deref(), Some("/tmp/new"));
 }
+
+#[test]
+fn test_save_learnings_empty_slice_is_noop() {
+    let conn = make_in_memory_db();
+    save_learnings(&conn, "sess-empty", &[]).unwrap();
+    let loaded = load_learnings(&conn, "sess-empty").unwrap();
+    assert!(loaded.is_empty());
+}

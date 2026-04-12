@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LearningPoint {
     pub category: String,  // "decision_points" | "lessons_gotchas" | "tools_commands"
     pub point:    String,
@@ -220,8 +220,7 @@ pub fn load_learnings(conn: &Connection, session_id: &str) -> Result<Vec<Learnin
                 point:    row.get(1)?,
             })
         })?
-        .filter_map(|r| r.ok())
-        .collect();
+        .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(points)
 }
 

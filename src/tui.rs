@@ -40,6 +40,11 @@ struct AppState {
     source_filter: Option<SessionSource>,  // None = all, Some(CC) = CC only, Some(OC) = OC only
     pinned: std::collections::HashSet<String>,
     db: Arc<Mutex<rusqlite::Connection>>,
+    settings: crate::settings::AppSettings,
+    // Settings panel state (used by AppMode::Settings, added in Task 6)
+    settings_editing: bool,
+    settings_input: String,
+    settings_error: Option<String>,
 }
 
 impl AppState {
@@ -49,9 +54,18 @@ impl AppState {
         if n > 0 {
             list_state.select(Some(0));
         }
-        let summaries_map = crate::store::load_all_summaries(&conn)?;
+        let mut summaries_map = crate::store::load_all_summaries(&conn)?;
+        // For sessions that already have accumulated learnings, build the combined display string
+        for (sid, factual) in summaries_map.iter_mut() {
+            if let Ok(learnings) = crate::store::load_learnings(&conn, sid) {
+                if !learnings.is_empty() {
+                    *factual = crate::summary::build_combined_display(factual, &learnings);
+                }
+            }
+        }
         let generated_at  = crate::store::load_all_generated_at(&conn)?;
         let pinned        = crate::store::load_pinned(&conn)?;
+        let settings = crate::settings::load(&conn);
         Ok(Self {
             filtered: (0..n).collect(),
             sessions,
@@ -68,6 +82,10 @@ impl AppState {
             source_filter: None,
             pinned,
             db: Arc::new(Mutex::new(conn)),
+            settings,
+            settings_editing: false,
+            settings_input: String::new(),
+            settings_error: None,
         })
     }
 
@@ -233,20 +251,34 @@ async fn run_event_loop(
                         }
                     }
 
-                    // Ctrl+R: regenerate summary
+                    // Ctrl+R: regenerate summary + knowledge extraction
                     (AppMode::Normal, KeyModifiers::CONTROL, KeyCode::Char('r')) => {
                         if let Some(s) = app.selected_session() {
-                            let id = s.session_id.clone();
-                            let jsonl = s.jsonl_path.clone();
-                            let source = s.source.clone();
-                            let summaries = app.summaries.clone();
+                            let id           = s.session_id.clone();
+                            let jsonl        = s.jsonl_path.clone();
+                            let source       = s.source.clone();
+                            let session      = s.clone();
+                            let summaries    = app.summaries.clone();
                             let generated_at = app.summary_generated_at.clone();
-                            let generating = app.generating.clone();
-                            let db = app.db.clone();
-                    // Clear any cached (possibly stale) summary then kick off generation.
-                    app.summaries.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
-                    app.summary_generated_at.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
-                    spawn_summary_generation(id, jsonl, source, summaries, generated_at, generating, db);
+                            let generating   = app.generating.clone();
+                            let db           = app.db.clone();
+                            let obsidian_path = app.settings.obsidian_kb_path.clone();
+
+                            // Load existing learnings before clearing cache
+                            let existing_learnings = crate::store::load_learnings(
+                                &app.db.lock().unwrap_or_else(|e| e.into_inner()),
+                                &id,
+                            ).unwrap_or_default();
+
+                            // Clear cached summary (learning rows in DB are kept)
+                            app.summaries.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+                            app.summary_generated_at.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+
+                            spawn_summary_generation(
+                                id, jsonl, source, session,
+                                existing_learnings, obsidian_path,
+                                summaries, generated_at, generating, db,
+                            );
                         }
                     }
 
@@ -428,8 +460,11 @@ async fn run_event_loop(
 
 fn spawn_summary_generation(
     id: String,
-    jsonl: Option<String>,   // Some for CC sessions, None for OC/Copilot sessions
+    jsonl: Option<String>,
     source: SessionSource,
+    session: UnifiedSession,
+    existing_learnings: Vec<crate::store::LearningPoint>,
+    obsidian_path: Option<String>,
     summaries: Arc<Mutex<std::collections::HashMap<String, String>>>,
     summary_generated_at: Arc<Mutex<std::collections::HashMap<String, i64>>>,
     generating: Arc<Mutex<std::collections::HashSet<String>>>,
@@ -437,7 +472,6 @@ fn spawn_summary_generation(
 ) {
     generating.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone());
     tokio::spawn(async move {
-        // Fetch messages: CC reads from JSONL file, OC queries SQLite directly
         let msgs = match source {
             SessionSource::ClaudeCode => {
                 let Some(jsonl_path) = jsonl else {
@@ -469,19 +503,46 @@ fn spawn_summary_generation(
                 SessionSource::OpenCode   => "oc",
                 SessionSource::Copilot    => "co",
             };
-            match crate::summary::generate_summary(&msgs, &[]).await {
-                Ok((text, _new_points)) => {
+            match crate::summary::generate_summary(&msgs, &existing_learnings).await {
+                Ok((factual, new_points)) => {
+                    // 1. Persist factual summary (overwrites existing)
                     let ts = crate::store::save_summary(
                         &db.lock().unwrap_or_else(|e| e.into_inner()),
-                        &id, src_str, &text,
+                        &id, src_str, &factual,
                     ).unwrap_or_else(|_| {
                         std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
                             .as_secs() as i64
                     });
-                    summaries.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), text);
+
+                    // 2. Append new learning points (never overwrites old ones)
+                    if !new_points.is_empty() {
+                        let _ = crate::store::save_learnings(
+                            &db.lock().unwrap_or_else(|e| e.into_inner()),
+                            &id, &new_points,
+                        );
+                    }
+
+                    // 3. Load ALL learnings (existing + new) for combined display
+                    let all_learnings = crate::store::load_learnings(
+                        &db.lock().unwrap_or_else(|e| e.into_inner()),
+                        &id,
+                    ).unwrap_or_default();
+
+                    // 4. Build combined display string (factual + all learnings)
+                    let combined = crate::summary::build_combined_display(&factual, &all_learnings);
+
+                    // 5. Update in-memory cache with combined display
+                    summaries.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), combined);
                     summary_generated_at.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), ts);
+
+                    // 6. Export to Obsidian (non-fatal — failure only logs, never blocks display)
+                    if let Some(ref vault_path) = obsidian_path {
+                        let _ = crate::obsidian::export_to_obsidian(
+                            &session, &factual, &all_learnings, vault_path,
+                        );
+                    }
                 }
                 Err(e) => {
                     summaries

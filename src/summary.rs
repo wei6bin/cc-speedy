@@ -142,8 +142,12 @@ pub async fn run_hook() -> Result<()> {
     };
 
     let messages = crate::sessions::parse_messages(std::path::Path::new(&jsonl_path))?;
-    let (summary_text, _new_points) = generate_summary(&messages, &[]).await?;
+    let existing_learnings = crate::store::load_learnings(&conn, &session_id).unwrap_or_default();
+    let (summary_text, new_points) = generate_summary(&messages, &existing_learnings).await?;
     crate::store::save_summary(&conn, &session_id, "cc", &summary_text)?;
+    if !new_points.is_empty() {
+        crate::store::save_learnings(&conn, &session_id, &new_points)?;
+    }
     eprintln!("cc-speedy: summary saved to db for session {}", session_id);
     Ok(())
 }

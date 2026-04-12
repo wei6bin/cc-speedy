@@ -14,6 +14,7 @@ pub const BORDER_LIST:    Color = Color::Rgb(42, 97, 128);   // #2a6180
 pub const BORDER_PREVIEW: Color = Color::Rgb(30, 102, 128);  // #1e6680
 pub const BORDER_JOBS:    Color = Color::Rgb(107, 79, 0);    // #6b4f00
 pub const BORDER_TOP:     Color = Color::Rgb(74, 74, 106);   // #4a4a6a
+pub const BORDER_SETTINGS: Color = Color::Rgb(128, 0, 128);  // magenta — settings popup
 
 // ── Focused panel border (same as TITLE) ─────────────────────────────
 pub const BORDER_FOCUSED: Color = TITLE;

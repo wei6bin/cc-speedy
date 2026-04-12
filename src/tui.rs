@@ -22,7 +22,7 @@ use crate::theme;
 enum Focus { List, Preview }
 
 #[derive(PartialEq)]
-enum AppMode { Normal, Filter, Rename, PinMenu }
+enum AppMode { Normal, Filter, Rename, PinMenu, Settings }
 
 struct AppState {
     sessions: Vec<UnifiedSession>,
@@ -448,6 +448,54 @@ async fn run_event_loop(
                         app.mode = AppMode::Normal;
                     }
 
+                    // --- Settings panel ---
+                    (AppMode::Normal, KeyModifiers::NONE, KeyCode::Char('s')) => {
+                        app.settings_input = app.settings.obsidian_kb_path
+                            .clone()
+                            .unwrap_or_default();
+                        app.settings_error = None;
+                        app.settings_editing = false;
+                        app.mode = AppMode::Settings;
+                    }
+                    (AppMode::Settings, _, KeyCode::Esc) => {
+                        if app.settings_editing {
+                            app.settings_editing = false;
+                            app.settings_error = None;
+                        } else {
+                            app.mode = AppMode::Normal;
+                        }
+                    }
+                    (AppMode::Settings, _, KeyCode::Enter) => {
+                        if !app.settings_editing {
+                            app.settings_editing = true;
+                            app.settings_error = None;
+                        } else {
+                            let path = app.settings_input.trim().to_string();
+                            let result = crate::settings::save_obsidian_path(
+                                &app.db.lock().unwrap_or_else(|e| e.into_inner()),
+                                &path,
+                            );
+                            match result {
+                                Ok(()) => {
+                                    app.settings.obsidian_kb_path = Some(path);
+                                    app.settings_editing = false;
+                                    app.settings_error = None;
+                                    app.status_msg = Some(("Obsidian path saved".to_string(), Instant::now()));
+                                    app.mode = AppMode::Normal;
+                                }
+                                Err(e) => {
+                                    app.settings_error = Some(e.to_string());
+                                }
+                            }
+                        }
+                    }
+                    (AppMode::Settings, _, KeyCode::Backspace) if app.settings_editing => {
+                        app.settings_input.pop();
+                    }
+                    (AppMode::Settings, _, KeyCode::Char(c)) if app.settings_editing => {
+                        app.settings_input.push(c);
+                    }
+
                     _ => {}
                 }
             }
@@ -600,6 +648,7 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
         AppMode::Filter => (format!("> {}|", app.filter), " Filter "),
         AppMode::Rename => (format!("rename: {}|", app.rename_input), " Rename  [Enter: confirm  Esc: cancel] "),
         AppMode::PinMenu => ("".to_string(), " cc-speedy "),
+        AppMode::Settings => ("".to_string(), " cc-speedy — Settings "),
         AppMode::Normal => {
             let hint = if app.filter.is_empty() {
                 "  (press / to filter)".to_string()
@@ -648,11 +697,11 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
         if at.elapsed().as_secs() < 2 {
             (msg.as_str(), Style::default().fg(theme::STATUS_OK))
         } else {
-            (" 1:CC  2:OC  3:CO  0:all  /: filter  Enter: resume  n: new  Ctrl+Y/N: yolo  Tab  j/k  r  c  x: pin  Ctrl+R  q",
+            (" 1:CC  2:OC  3:CO  0:all  /: filter  Enter: resume  n: new  Ctrl+Y/N: yolo  Tab  j/k  r  c  x: pin  s: settings  Ctrl+R  q",
              Style::default().fg(theme::STATUS_HELP))
         }
     } else {
-        (" 1:CC  2:OC  3:CO  0:all  /: filter  Enter: resume  n: new  Ctrl+Y/N: yolo  Tab  j/k  r  c  x: pin  Ctrl+R  q",
+        (" 1:CC  2:OC  3:CO  0:all  /: filter  Enter: resume  n: new  Ctrl+Y/N: yolo  Tab  j/k  r  c  x: pin  s: settings  Ctrl+R  q",
          Style::default().fg(theme::STATUS_HELP))
     };
     f.render_widget(Paragraph::new(status_text).style(status_style), chunks[3]);
@@ -660,6 +709,9 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
     // Overlay popup for pin/unpin
     if app.mode == AppMode::PinMenu {
         draw_pin_popup(f, app, area);
+    }
+    if app.mode == AppMode::Settings {
+        draw_settings_popup(f, app, area);
     }
 }
 
@@ -838,6 +890,46 @@ fn draw_pin_popup(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
                 .borders(Borders::ALL)
                 .title(" Pin / Unpin  (p) ")
                 .border_style(theme::pin_popup_style()),
+        )
+        .wrap(Wrap { trim: false });
+    f.render_widget(popup, popup_area);
+}
+
+fn draw_settings_popup(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
+    let popup_area = centered_rect(70, 10, area);
+    f.render_widget(Clear, popup_area);
+
+    let obsidian_display = if app.settings_editing {
+        format!("▶ {}|", app.settings_input)
+    } else {
+        let val = app.settings.obsidian_kb_path.as_deref().unwrap_or("(not set)");
+        format!("  {}", val)
+    };
+
+    let error_line = if let Some(ref err) = app.settings_error {
+        format!("\n  ✗ {}", err)
+    } else {
+        String::new()
+    };
+
+    let hint = if app.settings_editing {
+        "[Enter] Save   [Esc] Cancel"
+    } else {
+        "[Enter] Edit   [Esc] Close"
+    };
+
+    let content = format!(
+        "\n  Obsidian KB path\n  {}{}\n\n  {}",
+        obsidian_display, error_line, hint
+    );
+
+    let popup = Paragraph::new(content)
+        .block(
+            Block::default()
+                .border_type(theme::BORDER_TYPE)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme::BORDER_SETTINGS))
+                .title(Span::styled(" Settings ", theme::title_style())),
         )
         .wrap(Wrap { trim: false });
     f.render_widget(popup, popup_area);

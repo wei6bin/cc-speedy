@@ -1,13 +1,13 @@
 use anyhow::Result;
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LearningPoint {
-    pub category: String,  // "decision_points" | "lessons_gotchas" | "tools_commands"
-    pub point:    String,
+    pub category: String, // "decision_points" | "lessons_gotchas" | "tools_commands"
+    pub point: String,
 }
 
 pub fn db_path() -> PathBuf {
@@ -46,6 +46,10 @@ pub fn open_db() -> Result<Connection> {
          CREATE TABLE IF NOT EXISTS settings (
              key   TEXT PRIMARY KEY,
              value TEXT NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS archived (
+             session_id   TEXT PRIMARY KEY,
+             archived_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
          );",
     )?;
     Ok(conn)
@@ -54,7 +58,9 @@ pub fn open_db() -> Result<Connection> {
 pub fn load_all_summaries(conn: &Connection) -> Result<HashMap<String, String>> {
     let mut stmt = conn.prepare("SELECT session_id, content FROM summaries")?;
     let map = stmt
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
         .filter_map(|r| r.ok())
         .collect();
     Ok(map)
@@ -63,14 +69,21 @@ pub fn load_all_summaries(conn: &Connection) -> Result<HashMap<String, String>> 
 pub fn load_all_generated_at(conn: &Connection) -> Result<HashMap<String, i64>> {
     let mut stmt = conn.prepare("SELECT session_id, generated_at FROM summaries")?;
     let map = stmt
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?
         .filter_map(|r| r.ok())
         .collect();
     Ok(map)
 }
 
 /// Insert or replace a summary. Returns the `generated_at` unix timestamp used.
-pub fn save_summary(conn: &Connection, session_id: &str, source: &str, content: &str) -> Result<i64> {
+pub fn save_summary(
+    conn: &Connection,
+    session_id: &str,
+    source: &str,
+    content: &str,
+) -> Result<i64> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -102,15 +115,41 @@ pub fn set_pinned(conn: &Connection, session_id: &str, pin: bool) -> Result<()> 
             params![session_id],
         )?;
     } else {
-        conn.execute("DELETE FROM pinned WHERE session_id = ?1", params![session_id])?;
+        conn.execute(
+            "DELETE FROM pinned WHERE session_id = ?1",
+            params![session_id],
+        )?;
+    }
+    Ok(())
+}
+
+pub fn load_all_archived(conn: &Connection) -> Result<HashSet<String>> {
+    let mut stmt = conn.prepare("SELECT session_id FROM archived")?;
+    let set = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(set)
+}
+
+pub fn set_archived(conn: &Connection, session_id: &str, archive: bool) -> Result<()> {
+    if archive {
+        conn.execute(
+            "INSERT OR IGNORE INTO archived (session_id) VALUES (?1)",
+            params![session_id],
+        )?;
+    } else {
+        conn.execute(
+            "DELETE FROM archived WHERE session_id = ?1",
+            params![session_id],
+        )?;
     }
     Ok(())
 }
 
 /// On first run (empty summaries table) import existing `.md` files and `pinned.json`.
 pub fn migrate_from_files(conn: &Connection) -> Result<()> {
-    let count: i64 =
-        conn.query_row("SELECT COUNT(*) FROM summaries", [], |r| r.get(0))?;
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM summaries", [], |r| r.get(0))?;
     if count > 0 {
         return Ok(()); // already populated
     }
@@ -142,9 +181,7 @@ pub fn migrate_from_files(conn: &Connection) -> Result<()> {
     }
 
     // OC summaries: ~/.local/share/opencode/summaries/{id}.md
-    if let Some(oc_dir) =
-        dirs::data_local_dir().map(|d| d.join("opencode").join("summaries"))
-    {
+    if let Some(oc_dir) = dirs::data_local_dir().map(|d| d.join("opencode").join("summaries")) {
         if let Ok(entries) = std::fs::read_dir(&oc_dir) {
             for entry in entries.filter_map(|e| e.ok()) {
                 let path = entry.path();
@@ -217,11 +254,21 @@ pub fn load_learnings(conn: &Connection, session_id: &str) -> Result<Vec<Learnin
         .query_map(params![session_id], |row| {
             Ok(LearningPoint {
                 category: row.get(0)?,
-                point:    row.get(1)?,
+                point: row.get(1)?,
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(points)
+}
+
+/// Load all session IDs that have at least one learning point.
+pub fn load_sessions_with_learnings(conn: &Connection) -> Result<HashSet<String>> {
+    let mut stmt = conn.prepare("SELECT DISTINCT session_id FROM learnings")?;
+    let set = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(set)
 }
 
 pub fn get_setting(conn: &Connection, key: &str) -> Option<String> {
@@ -229,7 +276,8 @@ pub fn get_setting(conn: &Connection, key: &str) -> Option<String> {
         "SELECT value FROM settings WHERE key = ?1",
         params![key],
         |r| r.get::<_, String>(0),
-    ).ok()
+    )
+    .ok()
 }
 
 pub fn set_setting(conn: &Connection, key: &str, value: &str) -> Result<()> {

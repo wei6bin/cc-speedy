@@ -18,16 +18,18 @@ use std::time::Instant;
 use crate::unified::{list_all_sessions, UnifiedSession, SessionSource};
 use crate::theme;
 
-#[derive(PartialEq)]
-enum Focus { List, Preview }
+#[derive(PartialEq, Copy, Clone)]
+enum Focus { ActiveList, ArchivedList, Preview }
 
 #[derive(PartialEq)]
 enum AppMode { Normal, Filter, Rename, PinMenu, Settings }
 
 struct AppState {
     sessions: Vec<UnifiedSession>,
-    filtered: Vec<usize>,
-    list_state: ListState,
+    filtered_active: Vec<usize>,
+    filtered_archived: Vec<usize>,
+    list_state_active: ListState,
+    list_state_archived: ListState,
     filter: String,
     mode: AppMode,
     rename_input: String,
@@ -39,6 +41,8 @@ struct AppState {
     status_msg: Option<(String, Instant)>,
     source_filter: Option<SessionSource>,  // None = all, Some(CC) = CC only, Some(OC) = OC only
     pinned: std::collections::HashSet<String>,
+    archived: std::collections::HashSet<String>,
+    has_learnings: std::collections::HashSet<String>,
     db: Arc<Mutex<rusqlite::Connection>>,
     settings: crate::settings::AppSettings,
     // Settings panel state (used by AppMode::Settings, added in Task 6)
@@ -50,10 +54,11 @@ struct AppState {
 impl AppState {
     fn new(sessions: Vec<UnifiedSession>, conn: rusqlite::Connection) -> anyhow::Result<Self> {
         let n = sessions.len();
-        let mut list_state = ListState::default();
+        let mut list_state_active = ListState::default();
         if n > 0 {
-            list_state.select(Some(0));
+            list_state_active.select(Some(0));
         }
+        let list_state_archived = ListState::default();
         let mut summaries_map = crate::store::load_all_summaries(&conn)?;
         // For sessions that already have accumulated learnings, build the combined display string
         for (sid, factual) in summaries_map.iter_mut() {
@@ -65,22 +70,28 @@ impl AppState {
         }
         let generated_at  = crate::store::load_all_generated_at(&conn)?;
         let pinned        = crate::store::load_pinned(&conn)?;
+        let archived       = crate::store::load_all_archived(&conn)?;
+        let has_learnings  = crate::store::load_sessions_with_learnings(&conn)?;
         let settings = crate::settings::load(&conn);
         Ok(Self {
-            filtered: (0..n).collect(),
+            filtered_active: (0..n).collect(),
+            filtered_archived: vec![],
             sessions,
-            list_state,
+            list_state_active,
+            list_state_archived,
             filter: String::new(),
             mode: AppMode::Normal,
             rename_input: String::new(),
             summaries: Arc::new(Mutex::new(summaries_map)),
             summary_generated_at: Arc::new(Mutex::new(generated_at)),
             generating: Arc::new(Mutex::new(std::collections::HashSet::new())),
-            focus: Focus::List,
+            focus: Focus::ActiveList,
             preview_scroll: 0,
             status_msg: None,
             source_filter: None,
             pinned,
+            archived,
+            has_learnings,
             db: Arc::new(Mutex::new(conn)),
             settings,
             settings_editing: false,
@@ -91,38 +102,85 @@ impl AppState {
 
     fn apply_filter(&mut self) {
         let q = self.filter.to_lowercase();
-        self.filtered = self
+        let pinned = &self.pinned;
+        let archived = &self.archived;
+
+        // Separate into active and archived
+        let mut active_indices: Vec<usize> = self
             .sessions
             .iter()
             .enumerate()
             .filter(|(_, s)| {
-                // Source filter
+                if archived.contains(&s.session_id) { return false; }
                 if let Some(ref sf) = self.source_filter {
                     if &s.source != sf { return false; }
                 }
-                // Text filter
                 q.is_empty()
                     || s.project_name.to_lowercase().contains(&q)
                     || s.summary.to_lowercase().contains(&q)
             })
             .map(|(i, _)| i)
             .collect();
-        // Pinned sessions float to the top, preserving relative order within each group.
-        let pinned = &self.pinned;
-        self.filtered.sort_by_key(|&i| {
+
+        let mut archived_indices: Vec<usize> = self
+            .sessions
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| {
+                if !archived.contains(&s.session_id) { return false; }
+                if let Some(ref sf) = self.source_filter {
+                    if &s.source != sf { return false; }
+                }
+                q.is_empty()
+                    || s.project_name.to_lowercase().contains(&q)
+                    || s.summary.to_lowercase().contains(&q)
+            })
+            .map(|(i, _)| i)
+            .collect();
+
+        // Sort active: pinned first, then by recency
+        active_indices.sort_by_key(|&i| {
             if pinned.contains(&self.sessions[i].session_id) { 0u8 } else { 1u8 }
         });
-        if !self.filtered.is_empty() {
-            self.list_state.select(Some(0));
+
+        // Sort archived by recency
+        archived_indices.sort_by_key(|&i| std::cmp::Reverse(self.sessions[i].modified));
+
+        self.filtered_active = active_indices;
+        self.filtered_archived = archived_indices;
+
+        // Select first item in active list if non-empty
+        if !self.filtered_active.is_empty() {
+            self.list_state_active.select(Some(0));
+            self.list_state_archived.select(Some(0));
+        } else if !self.filtered_archived.is_empty() {
+            self.list_state_active.select(None);
+            self.list_state_archived.select(Some(0));
         } else {
-            self.list_state.select(None);
+            self.list_state_active.select(None);
+            self.list_state_archived.select(None);
         }
     }
 
     fn selected_session(&self) -> Option<&UnifiedSession> {
-        let idx = self.list_state.selected()?;
-        let raw = *self.filtered.get(idx)?;
-        self.sessions.get(raw)
+        match self.focus {
+            Focus::ActiveList => {
+                let idx = self.list_state_active.selected()?;
+                let raw = *self.filtered_active.get(idx)?;
+                self.sessions.get(raw)
+            }
+            Focus::ArchivedList => {
+                let idx = self.list_state_archived.selected()?;
+                let raw = *self.filtered_archived.get(idx)?;
+                self.sessions.get(raw)
+            }
+            Focus::Preview => {
+                // Use active list selection when in preview
+                let idx = self.list_state_active.selected()?;
+                let raw = *self.filtered_active.get(idx)?;
+                self.sessions.get(raw)
+            }
+        }
     }
 }
 
@@ -204,10 +262,12 @@ async fn run_event_loop(
                                 let id = s.session_id.clone();
                                 let _ = crate::sessions::write_rename(&id, &title);
                                 // Update in-memory immediately
-                                if let Some(s) = app.filtered.get(
-                                    app.list_state.selected().unwrap_or(0)
-                                ).and_then(|&i| app.sessions.get_mut(i)) {
-                                    s.summary = title;
+                                if let Some(idx) = app.list_state_active.selected() {
+                                    if let Some(&raw) = app.filtered_active.get(idx) {
+                                        if let Some(s) = app.sessions.get_mut(raw) {
+                                            s.summary = title;
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -220,7 +280,11 @@ async fn run_event_loop(
 
                     // --- Normal navigation ---
                     (AppMode::Normal, _, KeyCode::Tab) => {
-                        app.focus = if app.focus == Focus::List { Focus::Preview } else { Focus::List };
+                        app.focus = match app.focus {
+                            Focus::ActiveList => Focus::ArchivedList,
+                            Focus::ArchivedList => Focus::Preview,
+                            Focus::Preview => Focus::ActiveList,
+                        };
                     }
 
                     (AppMode::Normal, _, KeyCode::Down)
@@ -228,13 +292,21 @@ async fn run_event_loop(
                     | (AppMode::Filter, _, KeyCode::Down) => {
                         if app.focus == Focus::Preview {
                             app.preview_scroll = app.preview_scroll.saturating_add(1);
-                        } else {
-                            let n = app.filtered.len();
+                        } else if app.focus == Focus::ActiveList {
+                            let n = app.filtered_active.len();
                             if n > 0 {
-                                let i = app.list_state.selected().unwrap_or(0);
+                                let i = app.list_state_active.selected().unwrap_or(0);
                                 let next = (i + 1).min(n - 1);
                                 if next != i { app.preview_scroll = 0; }
-                                app.list_state.select(Some(next));
+                                app.list_state_active.select(Some(next));
+                            }
+                        } else {
+                            let n = app.filtered_archived.len();
+                            if n > 0 {
+                                let i = app.list_state_archived.selected().unwrap_or(0);
+                                let next = (i + 1).min(n - 1);
+                                if next != i { app.preview_scroll = 0; }
+                                app.list_state_archived.select(Some(next));
                             }
                         }
                     }
@@ -243,11 +315,16 @@ async fn run_event_loop(
                     | (AppMode::Filter, _, KeyCode::Up) => {
                         if app.focus == Focus::Preview {
                             app.preview_scroll = app.preview_scroll.saturating_sub(1);
-                        } else {
-                            let i = app.list_state.selected().unwrap_or(0);
+                        } else if app.focus == Focus::ActiveList {
+                            let i = app.list_state_active.selected().unwrap_or(0);
                             let prev = i.saturating_sub(1);
                             if prev != i { app.preview_scroll = 0; }
-                            app.list_state.select(Some(prev));
+                            app.list_state_active.select(Some(prev));
+                        } else {
+                            let i = app.list_state_archived.selected().unwrap_or(0);
+                            let prev = i.saturating_sub(1);
+                            if prev != i { app.preview_scroll = 0; }
+                            app.list_state_archived.select(Some(prev));
                         }
                     }
 
@@ -420,6 +497,28 @@ async fn run_event_loop(
                     (AppMode::Normal, KeyModifiers::NONE, KeyCode::Char('x')) => {
                         if app.selected_session().is_some() {
                             app.mode = AppMode::PinMenu;
+                        }
+                    }
+
+                    // a: toggle archive status
+                    (AppMode::Normal, KeyModifiers::NONE, KeyCode::Char('a')) => {
+                        if let Some(s) = app.selected_session() {
+                            let id = s.session_id.clone();
+                            let now_archived = if app.archived.contains(&id) {
+                                app.archived.remove(&id);
+                                false
+                            } else {
+                                app.archived.insert(id.clone());
+                                true
+                            };
+                            let _ = crate::store::set_archived(
+                                &app.db.lock().unwrap_or_else(|e| e.into_inner()),
+                                &id,
+                                now_archived,
+                            );
+                            app.apply_filter();
+                            let msg = if now_archived { "Archived" } else { "Unarchived" };
+                            app.status_msg = Some((msg.to_string(), Instant::now()));
                         }
                     }
 
@@ -668,13 +767,56 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
         );
     f.render_widget(filter_block, chunks[0]);
 
-    // Main panes
+    // Main panes: left panel (split active/archived) and right preview
     let panes = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
         .split(chunks[1]);
 
-    draw_list(f, app, panes[0]);
+    // Split left pane vertically: active sessions on top, archived below
+    let archived_count = app.filtered_archived.len();
+    let archived_height = if archived_count > 0 { 10 } else { 0 };
+    let archived_height_constraint = if archived_count > 0 {
+        Constraint::Length(archived_height as u16)
+    } else {
+        Constraint::Min(0)
+    };
+
+    let list_panes = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(0),
+            archived_height_constraint,
+        ])
+        .split(panes[0]);
+
+    draw_list(
+        f,
+        list_panes[0],
+        &app.sessions,
+        &app.pinned,
+        &app.has_learnings,
+        &app.filtered_active,
+        &mut app.list_state_active,
+        "Sessions",
+        Focus::ActiveList,
+        app.focus,
+    );
+    if archived_count > 0 {
+        draw_list(
+            f,
+            list_panes[1],
+            &app.sessions,
+            &app.pinned,
+            &app.has_learnings,
+            &app.filtered_archived,
+            &mut app.list_state_archived,
+            "Archived",
+            Focus::ArchivedList,
+            app.focus,
+        );
+    }
+
     draw_preview(f, app, panes[1], app.preview_scroll);
 
     // Background jobs panel
@@ -697,11 +839,11 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
         if at.elapsed().as_secs() < 2 {
             (msg.as_str(), Style::default().fg(theme::STATUS_OK))
         } else {
-            (" 1:CC  2:OC  3:CO  0:all  /: filter  Enter: resume  n: new  Ctrl+Y/N: yolo  Tab  j/k  r  c  x: pin  s: settings  Ctrl+R  q",
+            (" 1:CC  2:OC  3:CO  0:all  /: filter  Enter: resume  n: new  Ctrl+Y/N: yolo  Tab  j/k  r  c  x: pin  a: archive  s: settings  Ctrl+R  q",
              Style::default().fg(theme::STATUS_HELP))
         }
     } else {
-        (" 1:CC  2:OC  3:CO  0:all  /: filter  Enter: resume  n: new  Ctrl+Y/N: yolo  Tab  j/k  r  c  x: pin  s: settings  Ctrl+R  q",
+        (" 1:CC  2:OC  3:CO  0:all  /: filter  Enter: resume  n: new  Ctrl+Y/N: yolo  Tab  j/k  r  c  x: pin  a: archive  s: settings  Ctrl+R  q",
          Style::default().fg(theme::STATUS_HELP))
     };
     f.render_widget(Paragraph::new(status_text).style(status_style), chunks[3]);
@@ -715,12 +857,22 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
     }
 }
 
-fn draw_list(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
-    let items: Vec<ListItem> = app
-        .filtered
+fn draw_list(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    sessions: &[UnifiedSession],
+    pinned: &std::collections::HashSet<String>,
+    has_learnings: &std::collections::HashSet<String>,
+    indices: &[usize],
+    list_state: &mut ListState,
+    title: &str,
+    focus: Focus,
+    current_focus: Focus,
+) {
+    let items: Vec<ListItem> = indices
         .iter()
         .map(|&i| {
-            let s = &app.sessions[i];
+            let s = &sessions[i];
             let dt = format_time(s.modified);
             let folder = crate::util::path_last_n(&s.project_path, 3);
             let label = if s.summary.is_empty() {
@@ -733,8 +885,13 @@ fn draw_list(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
                 SessionSource::OpenCode   => ("[OC]", theme::OC_BADGE),
                 SessionSource::Copilot    => ("[CO]", theme::CO_BADGE),
             };
-            let pin_span = if app.pinned.contains(&s.session_id) {
+            let pin_span = if pinned.contains(&s.session_id) {
                 Span::styled("* ", theme::pin_style())
+            } else {
+                Span::raw("  ")
+            };
+            let kb_span = if has_learnings.contains(&s.session_id) {
+                Span::styled("✓ ", Style::default().fg(theme::TITLE))
             } else {
                 Span::raw("  ")
             };
@@ -742,6 +899,7 @@ fn draw_list(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
                 pin_span,
                 Span::styled(format!("{} ", dt), theme::dim_style()),
                 Span::styled(format!("{} ", badge_text), Style::default().fg(badge_color)),
+                kb_span,
                 Span::styled(format!("{:<22}", label), Style::default().fg(theme::FG)),
                 Span::styled(format!("{:>4} ", s.message_count), theme::dim_style()),
                 Span::styled(folder, theme::dim_style()),
@@ -751,8 +909,8 @@ fn draw_list(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
         .collect();
 
     let count = items.len();
-    let focused = app.focus == Focus::List;
-    let border_color = if focused { theme::BORDER_FOCUSED } else { theme::BORDER_LIST };
+    let is_focused = current_focus == focus;
+    let border_color = if is_focused { theme::BORDER_FOCUSED } else { theme::BORDER_LIST };
     let list = List::new(items)
         .block(
             Block::default()
@@ -760,14 +918,14 @@ fn draw_list(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
                 .borders(Borders::ALL)
                 .border_style(theme::panel_block_style(border_color))
                 .title(Span::styled(
-                    format!(" Sessions ({}) ", count),
+                    format!(" {} ({}) ", title, count),
                     theme::title_style(),
                 )),
         )
         .highlight_style(theme::sel_style())
         .highlight_symbol("► ");
 
-    f.render_stateful_widget(list, area, &mut app.list_state);
+    f.render_stateful_widget(list, area, list_state);
 }
 
 fn build_preview_content(app: &AppState) -> String {

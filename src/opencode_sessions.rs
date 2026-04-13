@@ -1,9 +1,9 @@
+use crate::sessions::Message;
+use crate::unified::{SessionSource, UnifiedSession};
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 use std::path::PathBuf;
 use std::time::{Duration, UNIX_EPOCH};
-use crate::sessions::Message;
-use crate::unified::{UnifiedSession, SessionSource};
 
 /// Path to the OpenCode SQLite database (~/.local/share/opencode/opencode.db).
 /// Returns None if the data_local_dir cannot be determined.
@@ -28,11 +28,15 @@ pub fn parse_opencode_messages(session_id: &str) -> Result<Vec<Message>> {
 }
 
 /// Query messages from an open connection (also used in tests).
-pub fn parse_opencode_messages_from_conn(conn: &Connection, session_id: &str) -> Result<Vec<Message>> {
+pub fn parse_opencode_messages_from_conn(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<Vec<Message>> {
     // Each message has a role stored in its JSON data field.
     // Text content lives in part rows whose data JSON has type="text".
     // We group all text parts per message, ordered by message creation time.
-    let mut stmt = conn.prepare("
+    let mut stmt = conn.prepare(
+        "
         SELECT
             json_extract(m.data, '$.role') AS role,
             p.data AS part_data
@@ -41,7 +45,8 @@ pub fn parse_opencode_messages_from_conn(conn: &Connection, session_id: &str) ->
         WHERE m.session_id = ?1
           AND p.data LIKE '{\"type\":\"text\"%'
         ORDER BY m.time_created ASC, p.time_created ASC
-    ")?;
+    ",
+    )?;
 
     let rows: Vec<(String, String)> = stmt
         .query_map([session_id], |row| {
@@ -50,14 +55,12 @@ pub fn parse_opencode_messages_from_conn(conn: &Connection, session_id: &str) ->
                 row.get::<_, String>(1)?,
             ))
         })?
-        .filter_map(|r| {
-            match r {
-                Ok(v) => Some(v),
-                Err(e) => {
-                    #[cfg(debug_assertions)]
-                    eprintln!("cc-speedy: skipping malformed part row: {}", e);
-                    None
-                }
+        .filter_map(|r| match r {
+            Ok(v) => Some(v),
+            Err(e) => {
+                #[cfg(debug_assertions)]
+                eprintln!("cc-speedy: skipping malformed part row: {}", e);
+                None
             }
         })
         .collect();
@@ -90,7 +93,8 @@ pub fn list_opencode_sessions() -> Result<Vec<UnifiedSession>> {
 
 /// Query sessions from an open connection (also used in tests with in-memory DB).
 pub fn query_sessions_from_conn(conn: &Connection) -> Result<Vec<UnifiedSession>> {
-    let mut stmt = conn.prepare("
+    let mut stmt = conn.prepare(
+        "
         SELECT
             s.id,
             COALESCE(s.title, ''),
@@ -104,7 +108,8 @@ pub fn query_sessions_from_conn(conn: &Connection) -> Result<Vec<UnifiedSession>
           AND s.parent_id IS NULL
         GROUP BY s.id
         ORDER BY s.time_updated DESC
-    ")?;
+    ",
+    )?;
 
     let rows: Vec<(String, String, i64, String, usize)> = stmt
         .query_map([], |row| {
@@ -116,14 +121,12 @@ pub fn query_sessions_from_conn(conn: &Connection) -> Result<Vec<UnifiedSession>
                 row.get::<_, usize>(4)?,
             ))
         })?
-        .filter_map(|r| {
-            match r {
-                Ok(v) => Some(v),
-                Err(e) => {
-                    #[cfg(debug_assertions)]
-                    eprintln!("cc-speedy: skipping malformed session row: {}", e);
-                    None
-                }
+        .filter_map(|r| match r {
+            Ok(v) => Some(v),
+            Err(e) => {
+                #[cfg(debug_assertions)]
+                eprintln!("cc-speedy: skipping malformed session row: {}", e);
+                None
             }
         })
         .collect();
@@ -136,22 +139,22 @@ pub fn query_sessions_from_conn(conn: &Connection) -> Result<Vec<UnifiedSession>
             .take(80)
             .collect();
 
-        let modified = UNIX_EPOCH
-            + Duration::from_millis(time_updated_ms.max(0) as u64);
+        let modified = UNIX_EPOCH + Duration::from_millis(time_updated_ms.max(0) as u64);
 
         let project_name = crate::util::path_last_n(&worktree, 2);
 
         sessions.push(UnifiedSession {
-            session_id:    id,
+            session_id: id,
             project_name,
-            project_path:  worktree,
+            project_path: worktree,
             modified,
             message_count,
             first_user_msg,
-            summary:       title,
-            git_branch:    String::new(),
-            source:        SessionSource::OpenCode,
-            jsonl_path:    opencode_db_path().map(|p| p.to_string_lossy().into_owned()),
+            summary: title,
+            git_branch: String::new(),
+            source: SessionSource::OpenCode,
+            jsonl_path: opencode_db_path().map(|p| p.to_string_lossy().into_owned()),
+            archived: false,
         });
     }
     Ok(sessions)
@@ -161,8 +164,9 @@ pub fn query_sessions_from_conn(conn: &Connection) -> Result<Vec<UnifiedSession>
 fn query_first_user_text(conn: &Connection, session_id: &str) -> Option<String> {
     // Parts of type "text" from the earliest message in the session.
     // We extract the "text" field from the JSON data column.
-    let result: Option<String> = conn.query_row(
-        "SELECT p.data
+    let result: Option<String> = conn
+        .query_row(
+            "SELECT p.data
          FROM part p
          JOIN message m ON m.id = p.message_id
          WHERE m.session_id = ?1
@@ -170,15 +174,13 @@ fn query_first_user_text(conn: &Connection, session_id: &str) -> Option<String> 
            AND p.data LIKE '{\"type\":\"text\"%'
          ORDER BY p.time_created ASC
          LIMIT 1",
-        [session_id],
-        |row| row.get::<_, String>(0),
-    ).optional().ok()?;
+            [session_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .ok()?;
 
     let data = result?;
     let v: serde_json::Value = serde_json::from_str(&data).ok()?;
     v["text"].as_str().map(|s| s.to_string())
 }
-
-
-
-

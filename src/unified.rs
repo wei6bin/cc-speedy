@@ -1,7 +1,7 @@
-use std::time::SystemTime;
-use anyhow::Result;
-use crate::sessions::{Session, list_sessions};
 use crate::opencode_sessions::list_opencode_sessions;
+use crate::sessions::{list_sessions, Session};
+use anyhow::Result;
+use std::time::SystemTime;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionSource {
@@ -12,32 +12,35 @@ pub enum SessionSource {
 
 #[derive(Debug, Clone)]
 pub struct UnifiedSession {
-    pub session_id:    String,
-    pub project_name:  String,
-    pub project_path:  String,
-    pub modified:      SystemTime,
+    pub session_id: String,
+    pub project_name: String,
+    pub project_path: String,
+    pub modified: SystemTime,
     pub message_count: usize,
     pub first_user_msg: String,
-    pub summary:       String,
-    pub git_branch:    String,
-    pub source:        SessionSource,
+    pub summary: String,
+    pub git_branch: String,
+    pub source: SessionSource,
     /// Some(path) for Claude Code sessions; None for OpenCode and Copilot sessions.
-    pub jsonl_path:    Option<String>,
+    pub jsonl_path: Option<String>,
+    /// Whether this session is archived (shown at bottom of list).
+    pub archived: bool,
 }
 
 impl From<Session> for UnifiedSession {
     fn from(s: Session) -> Self {
         UnifiedSession {
-            session_id:    s.session_id,
-            project_name:  s.project_name,
-            project_path:  s.project_path,
-            modified:      s.modified,
+            session_id: s.session_id,
+            project_name: s.project_name,
+            project_path: s.project_path,
+            modified: s.modified,
             message_count: s.message_count,
             first_user_msg: s.first_user_msg,
-            summary:       s.summary,
-            git_branch:    s.git_branch,
-            source:        SessionSource::ClaudeCode,
-            jsonl_path:    Some(s.jsonl_path),
+            summary: s.summary,
+            git_branch: s.git_branch,
+            source: SessionSource::ClaudeCode,
+            jsonl_path: Some(s.jsonl_path),
+            archived: false,
         }
     }
 }

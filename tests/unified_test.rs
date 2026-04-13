@@ -1,5 +1,5 @@
 use cc_speedy::sessions::Session;
-use cc_speedy::unified::{UnifiedSession, SessionSource};
+use cc_speedy::unified::{SessionSource, UnifiedSession};
 use std::time::SystemTime;
 
 fn make_cc_session() -> Session {
@@ -29,7 +29,10 @@ fn test_from_cc_session_preserves_fields() {
     assert_eq!(s.project_path, "/home/user/ai/myproj");
     assert_eq!(s.message_count, 10);
     assert_eq!(s.summary, "Fixed auth bug");
-    assert_eq!(s.jsonl_path, Some("/home/user/.claude/projects/x/abc-123.jsonl".to_string()));
+    assert_eq!(
+        s.jsonl_path,
+        Some("/home/user/.claude/projects/x/abc-123.jsonl".to_string())
+    );
 }
 
 #[test]
@@ -45,6 +48,7 @@ fn test_opencode_session_has_no_jsonl_path() {
         git_branch: "".to_string(),
         source: SessionSource::OpenCode,
         jsonl_path: None,
+        archived: false,
     };
     assert!(s.jsonl_path.is_none());
 }
@@ -56,6 +60,9 @@ fn test_list_all_sessions_does_not_panic() {
     // Smoke test: just ensure it returns without panicking.
     // Real DB may or may not exist on the test machine.
     let result = list_all_sessions();
-    assert!(result.is_ok(), "list_all_sessions returned error: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "list_all_sessions returned error: {:?}",
+        result
+    );
 }
-

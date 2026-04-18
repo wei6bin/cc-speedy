@@ -11,3 +11,4 @@ pub mod util;
 pub mod theme;
 pub mod obsidian;
 pub mod settings;
+pub mod update;

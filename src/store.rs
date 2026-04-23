@@ -261,6 +261,37 @@ pub fn load_learnings(conn: &Connection, session_id: &str) -> Result<Vec<Learnin
     Ok(points)
 }
 
+/// One row of the cross-session Learning Library. `session_title` and
+/// `session_modified` are derived from the summaries/sessions_index tables;
+/// for display only.
+#[derive(Clone, Debug)]
+pub struct LearningEntry {
+    pub session_id: String,
+    pub category: String,
+    pub point: String,
+    pub captured_at: i64,
+}
+
+/// Load every learning point across every session, ordered newest-first by
+/// capture time. Title and session-date are resolved at render time via the
+/// in-memory session map — not baked into this query.
+pub fn load_all_learnings(conn: &Connection) -> Result<Vec<LearningEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT session_id, category, point, captured_at FROM learnings ORDER BY captured_at DESC, id DESC",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(LearningEntry {
+                session_id: row.get(0)?,
+                category: row.get(1)?,
+                point: row.get(2)?,
+                captured_at: row.get(3)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
 /// Load all session IDs that have at least one learning point.
 pub fn load_sessions_with_learnings(conn: &Connection) -> Result<HashSet<String>> {
     let mut stmt = conn.prepare("SELECT DISTINCT session_id FROM learnings")?;

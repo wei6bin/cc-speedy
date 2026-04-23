@@ -22,7 +22,7 @@ use crate::theme;
 enum Focus { ActiveList, ArchivedList, Preview }
 
 #[derive(PartialEq)]
-enum AppMode { Normal, Filter, Grep, Rename, ActionMenu, Settings }
+enum AppMode { Normal, Filter, Grep, Rename, ActionMenu, Settings, Library, LibraryFilter }
 
 struct AppState {
     sessions: Vec<UnifiedSession>,
@@ -51,6 +51,12 @@ struct AppState {
     /// Live git status per unique project_path. Populated by a startup batch
     /// and refreshed on selection change (30s stale) and manual `g`.
     git_status: Arc<Mutex<std::collections::HashMap<String, (crate::git_status::GitStatus, Instant)>>>,
+    /// Learning Library state — populated on `L` entry, cleared on Esc.
+    library_entries: Vec<crate::store::LearningEntry>,
+    library_filter: String,
+    library_category: Option<String>,  // None = all
+    library_filtered: Vec<usize>,
+    library_list_state: ListState,
     settings: crate::settings::AppSettings,
     // Settings panel state (used by AppMode::Settings, added in Task 6)
     settings_editing: bool,
@@ -103,11 +109,40 @@ impl AppState {
             has_learnings,
             db: Arc::new(Mutex::new(conn)),
             git_status: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            library_entries: Vec::new(),
+            library_filter: String::new(),
+            library_category: None,
+            library_filtered: Vec::new(),
+            library_list_state: ListState::default(),
             settings,
             settings_editing: false,
             settings_input: String::new(),
             settings_error: None,
         })
+    }
+
+    /// Rebuild `library_filtered` based on the current category + text filter.
+    /// Called on every edit to library_filter or library_category.
+    fn apply_library_filter(&mut self) {
+        let q = self.library_filter.to_lowercase();
+        let cat = self.library_category.as_deref();
+        self.library_filtered = self
+            .library_entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| {
+                if let Some(c) = cat {
+                    if e.category != c { return false; }
+                }
+                q.is_empty() || e.point.to_lowercase().contains(&q)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if self.library_filtered.is_empty() {
+            self.library_list_state.select(None);
+        } else {
+            self.library_list_state.select(Some(0));
+        }
     }
 
     /// Rebuild per-session haystacks for grep mode. Each haystack is lowercased
@@ -313,6 +348,109 @@ async fn run_event_loop(
                     // --- Global ---
                     (_, KeyModifiers::CONTROL, KeyCode::Char('c')) => break,
                     (AppMode::Normal, _, KeyCode::Char('q')) => break,
+
+                    // --- Learning Library mode ---
+                    (AppMode::Normal, _, KeyCode::Char('L')) => {
+                        let conn = app.db.lock().unwrap_or_else(|e| e.into_inner());
+                        match crate::store::load_all_learnings(&conn) {
+                            Ok(entries) => {
+                                drop(conn);
+                                app.library_entries = entries;
+                                app.library_filter.clear();
+                                app.library_category = None;
+                                app.apply_library_filter();
+                                app.mode = AppMode::Library;
+                            }
+                            Err(e) => {
+                                app.status_msg = Some((format!("Library load failed: {e}"), Instant::now()));
+                            }
+                        }
+                    }
+                    (AppMode::Library, _, KeyCode::Esc) => {
+                        app.mode = AppMode::Normal;
+                        app.library_entries.clear();
+                        app.library_filtered.clear();
+                        app.library_filter.clear();
+                    }
+                    (AppMode::Library, _, KeyCode::Char('/')) => {
+                        app.mode = AppMode::LibraryFilter;
+                    }
+                    (AppMode::LibraryFilter, _, KeyCode::Esc) => {
+                        app.library_filter.clear();
+                        app.apply_library_filter();
+                        app.mode = AppMode::Library;
+                    }
+                    (AppMode::LibraryFilter, _, KeyCode::Enter) => {
+                        app.mode = AppMode::Library;
+                    }
+                    (AppMode::LibraryFilter, _, KeyCode::Backspace) => {
+                        app.library_filter.pop();
+                        app.apply_library_filter();
+                    }
+                    (AppMode::LibraryFilter, KeyModifiers::NONE, KeyCode::Char(c))
+                    | (AppMode::LibraryFilter, KeyModifiers::SHIFT, KeyCode::Char(c)) => {
+                        app.library_filter.push(c);
+                        app.apply_library_filter();
+                    }
+                    (AppMode::Library, _, KeyCode::Char('0')) => {
+                        app.library_category = None;
+                        app.apply_library_filter();
+                    }
+                    (AppMode::Library, _, KeyCode::Char('1')) => {
+                        app.library_category = Some("decision_points".to_string());
+                        app.apply_library_filter();
+                    }
+                    (AppMode::Library, _, KeyCode::Char('2')) => {
+                        app.library_category = Some("lessons_gotchas".to_string());
+                        app.apply_library_filter();
+                    }
+                    (AppMode::Library, _, KeyCode::Char('3')) => {
+                        app.library_category = Some("tools_commands".to_string());
+                        app.apply_library_filter();
+                    }
+                    (AppMode::Library, _, KeyCode::Down)
+                    | (AppMode::Library, _, KeyCode::Char('j')) => {
+                        let n = app.library_filtered.len();
+                        if n > 0 {
+                            let i = app.library_list_state.selected().unwrap_or(0);
+                            app.library_list_state.select(Some((i + 1).min(n - 1)));
+                        }
+                    }
+                    (AppMode::Library, _, KeyCode::Up)
+                    | (AppMode::Library, _, KeyCode::Char('k')) => {
+                        let i = app.library_list_state.selected().unwrap_or(0);
+                        app.library_list_state.select(Some(i.saturating_sub(1)));
+                    }
+                    (AppMode::Library, _, KeyCode::Enter) => {
+                        let target_id = app
+                            .library_list_state
+                            .selected()
+                            .and_then(|li| app.library_filtered.get(li).copied())
+                            .and_then(|ei| app.library_entries.get(ei))
+                            .map(|e| e.session_id.clone());
+                        if let Some(id) = target_id {
+                            // Try to find in active list
+                            let active_pos = app.filtered_active.iter().position(|&i| app.sessions[i].session_id == id);
+                            let archived_pos = app.filtered_archived.iter().position(|&i| app.sessions[i].session_id == id);
+                            if let Some(pos) = active_pos {
+                                app.list_state_active.select(Some(pos));
+                                app.focus = Focus::ActiveList;
+                                app.preview_scroll = 0;
+                                app.mode = AppMode::Normal;
+                                app.library_entries.clear();
+                                app.library_filtered.clear();
+                            } else if let Some(pos) = archived_pos {
+                                app.list_state_archived.select(Some(pos));
+                                app.focus = Focus::ArchivedList;
+                                app.preview_scroll = 0;
+                                app.mode = AppMode::Normal;
+                                app.library_entries.clear();
+                                app.library_filtered.clear();
+                            } else {
+                                app.status_msg = Some(("Session not in current view — Esc then 0 to unfilter".to_string(), Instant::now()));
+                            }
+                        }
+                    }
 
                     // --- Grep mode ---
                     (AppMode::Normal, _, KeyCode::Char('?')) => {
@@ -908,9 +1046,27 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
         AppMode::Rename => (format!("rename: {}|", app.rename_input), " Rename  [Enter: confirm  Esc: cancel] "),
         AppMode::ActionMenu => ("".to_string(), " cc-speedy "),
         AppMode::Settings => ("".to_string(), " cc-speedy — Settings "),
+        AppMode::Library => {
+            let cat_label = match app.library_category.as_deref() {
+                Some("decision_points") => "decisions",
+                Some("lessons_gotchas") => "lessons",
+                Some("tools_commands") => "tools",
+                _ => "all",
+            };
+            let n = app.library_filtered.len();
+            (
+                format!("  [{}]  {} entr{}  (/: filter  0:all  1:dec  2:lsn  3:tol  Enter: jump  Esc: exit)",
+                        cat_label, n, if n == 1 { "y" } else { "ies" }),
+                " Learning Library ",
+            )
+        }
+        AppMode::LibraryFilter => (
+            format!("library filter: {}|", app.library_filter),
+            " Library — Filter  [Esc: clear  Enter: apply] ",
+        ),
         AppMode::Normal => {
             let hint = if app.filter.is_empty() {
-                "  (press / to filter, ? to grep)".to_string()
+                "  (press / to filter, ? to grep, L: library)".to_string()
             } else {
                 format!("  filter: {}", app.filter)
             };
@@ -926,6 +1082,11 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
                 .title(Span::styled(bar_title, theme::title_style())),
         );
     f.render_widget(filter_block, chunks[0]);
+
+    // Library mode takes over the main content area with a full-width list.
+    if app.mode == AppMode::Library || app.mode == AppMode::LibraryFilter {
+        draw_library(f, app, chunks[1]);
+    } else {
 
     // Main panes: left panel (split active/archived) and right preview
     let panes = Layout::default()
@@ -985,6 +1146,7 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
     }
 
     draw_preview(f, app, panes[1], app.preview_scroll);
+    } // end of non-library branch
 
     // Background jobs panel
     if jobs_height > 0 {
@@ -1006,11 +1168,11 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
         if at.elapsed().as_secs() < 2 {
             (msg.as_str(), Style::default().fg(theme::STATUS_OK))
         } else {
-            (" 1:CC  2:OC  3:CO  0:all  /: filter  ?: grep  Enter: resume  Ctrl+Y: yolo  Tab  j/k  r  c  x: actions  a: archive  g: git  s: settings  Ctrl+R  q",
+            (" 1:CC  2:OC  3:CO  0:all  /: filter  ?: grep  L: library  Enter: resume  Ctrl+Y: yolo  Tab  j/k  r  c  x: actions  a: archive  g: git  s: settings  Ctrl+R  q",
              Style::default().fg(theme::STATUS_HELP))
         }
     } else {
-        (" 1:CC  2:OC  3:CO  0:all  /: filter  ?: grep  Enter: resume  Ctrl+Y: yolo  Tab  j/k  r  c  x: actions  a: archive  g: git  s: settings  Ctrl+R  q",
+        (" 1:CC  2:OC  3:CO  0:all  /: filter  ?: grep  L: library  Enter: resume  Ctrl+Y: yolo  Tab  j/k  r  c  x: actions  a: archive  g: git  s: settings  Ctrl+R  q",
          Style::default().fg(theme::STATUS_HELP))
     };
     f.render_widget(Paragraph::new(status_text).style(status_style), chunks[3]);
@@ -1022,6 +1184,67 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
     if app.mode == AppMode::Settings {
         draw_settings_popup(f, app, area);
     }
+}
+
+fn draw_library(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
+    use ratatui::style::Color;
+
+    // Build session_id → (title, modified) lookup from the in-memory sessions vec.
+    let session_map: std::collections::HashMap<&str, (&str, std::time::SystemTime)> = app
+        .sessions
+        .iter()
+        .map(|s| {
+            let title = if !s.summary.is_empty() { s.summary.as_str() } else { s.project_name.as_str() };
+            (s.session_id.as_str(), (title, s.modified))
+        })
+        .collect();
+
+    let items: Vec<ListItem> = app
+        .library_filtered
+        .iter()
+        .filter_map(|&ei| app.library_entries.get(ei))
+        .map(|e| {
+            let (cat_label, cat_color) = match e.category.as_str() {
+                "decision_points" => ("DEC", Color::Rgb(30, 144, 255)),      // blue
+                "lessons_gotchas" => ("LSN", Color::Rgb(212, 160, 23)),      // amber
+                "tools_commands"  => ("TOL", Color::Rgb(13, 131, 0)),        // green
+                _                 => ("???", theme::FG_DIM),
+            };
+            let (stitle, smodified) = session_map
+                .get(e.session_id.as_str())
+                .copied()
+                .unwrap_or(("(unknown session)", std::time::UNIX_EPOCH));
+            let date = format_time(smodified);
+            Line::from(vec![
+                Span::styled(format!("[{}] ", cat_label), Style::default().fg(cat_color)),
+                Span::styled(e.point.clone(), Style::default().fg(theme::FG)),
+                Span::styled("  —  ", theme::dim_style()),
+                Span::styled(truncate(stitle, 30), Style::default().fg(theme::FG_DIM)),
+                Span::styled(format!("  · {}", date), theme::dim_style()),
+            ])
+        })
+        .map(ListItem::new)
+        .collect();
+
+    let border_color = theme::BORDER_FOCUSED;
+    let title = format!(
+        " Learning Library — {} entr{} ",
+        items.len(),
+        if items.len() == 1 { "y" } else { "ies" },
+    );
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .border_type(theme::BORDER_TYPE)
+                .borders(Borders::ALL)
+                .border_style(theme::panel_block_style(border_color))
+                .title(Span::styled(title, theme::title_style())),
+        )
+        .highlight_style(
+            Style::default().bg(theme::SEL_BG).fg(theme::SEL_FG).add_modifier(ratatui::style::Modifier::BOLD),
+        );
+
+    f.render_stateful_widget(list, area, &mut app.library_list_state);
 }
 
 fn draw_list(

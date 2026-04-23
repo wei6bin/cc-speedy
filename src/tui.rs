@@ -48,6 +48,9 @@ struct AppState {
     archived: std::collections::HashSet<String>,
     has_learnings: std::collections::HashSet<String>,
     db: Arc<Mutex<rusqlite::Connection>>,
+    /// Live git status per unique project_path. Populated by a startup batch
+    /// and refreshed on selection change (30s stale) and manual `g`.
+    git_status: Arc<Mutex<std::collections::HashMap<String, (crate::git_status::GitStatus, Instant)>>>,
     settings: crate::settings::AppSettings,
     // Settings panel state (used by AppMode::Settings, added in Task 6)
     settings_editing: bool,
@@ -99,6 +102,7 @@ impl AppState {
             archived,
             has_learnings,
             db: Arc::new(Mutex::new(conn)),
+            git_status: Arc::new(Mutex::new(std::collections::HashMap::new())),
             settings,
             settings_editing: false,
             settings_input: String::new(),
@@ -217,6 +221,54 @@ impl AppState {
     }
 }
 
+/// Walk every unique project_path across all sessions and dispatch a git
+/// status check per path. Each check runs on a blocking worker; results land
+/// in `app.git_status` asynchronously. Safe to call multiple times.
+fn spawn_git_status_batch(app: &AppState) {
+    let paths: std::collections::HashSet<String> = app
+        .sessions
+        .iter()
+        .map(|s| s.project_path.clone())
+        .collect();
+    for path in paths {
+        spawn_git_status_check(&app.git_status, path);
+    }
+}
+
+/// If the currently selected session's git status is stale (> 30s) or missing,
+/// enqueue a background refresh. Called once per event-loop tick; cheap when
+/// fresh (hashmap lookup + instant comparison).
+fn maybe_refresh_selected_git(app: &AppState) {
+    const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
+    let Some(s) = app.selected_session() else { return; };
+    let path = s.project_path.clone();
+    let needs_refresh = {
+        let cache = app.git_status.lock().unwrap_or_else(|e| e.into_inner());
+        match cache.get(&path) {
+            Some((_, at)) => at.elapsed() >= STALE_AFTER,
+            None => true,
+        }
+    };
+    if needs_refresh {
+        spawn_git_status_check(&app.git_status, path);
+    }
+}
+
+/// Refresh the git status for one path in the background. Non-blocking.
+fn spawn_git_status_check(
+    cache: &Arc<Mutex<std::collections::HashMap<String, (crate::git_status::GitStatus, Instant)>>>,
+    path: String,
+) {
+    let cache = cache.clone();
+    tokio::task::spawn_blocking(move || {
+        let status = crate::git_status::check(&path, 500);
+        cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(path, (status, Instant::now()));
+    });
+}
+
 pub async fn run() -> Result<()> {
     let sessions = list_all_sessions()?;
 
@@ -230,6 +282,11 @@ pub async fn run() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = AppState::new(sessions, conn)?;
+
+    // Kick off git status checks for each unique project path in parallel.
+    // Cache is shared; results land while the TUI renders. First frame may
+    // show blank indicators; subsequent redraws pick up completed entries.
+    spawn_git_status_batch(&app);
 
     // Run event loop, always clean up terminal regardless of result
     let result = run_event_loop(&mut terminal, &mut app).await;
@@ -247,6 +304,7 @@ async fn run_event_loop(
     app: &mut AppState,
 ) -> Result<()> {
     loop {
+        maybe_refresh_selected_git(app);
         terminal.draw(|f| draw(f, app))?;
 
         if event::poll(std::time::Duration::from_millis(200))? {
@@ -388,6 +446,12 @@ async fn run_event_loop(
                             if prev != i { app.preview_scroll = 0; }
                             app.list_state_archived.select(Some(prev));
                         }
+                    }
+
+                    // g: force-refresh all git status entries
+                    (AppMode::Normal, KeyModifiers::NONE, KeyCode::Char('g')) => {
+                        spawn_git_status_batch(app);
+                        app.status_msg = Some(("refreshing git…".to_string(), Instant::now()));
                     }
 
                     // Ctrl+R: regenerate summary + knowledge extraction
@@ -886,12 +950,18 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
         ])
         .split(panes[0]);
 
+    // Clone the git cache once per frame so the two draw_list calls can each
+    // pass a &HashMap without holding the mutex across both (would deadlock
+    // with the background git-status writers).
+    let git_cache = app.git_status.lock().unwrap_or_else(|e| e.into_inner()).clone();
+
     draw_list(
         f,
         list_panes[0],
         &app.sessions,
         &app.pinned,
         &app.has_learnings,
+        &git_cache,
         &app.filtered_active,
         &mut app.list_state_active,
         "Sessions",
@@ -905,6 +975,7 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
             &app.sessions,
             &app.pinned,
             &app.has_learnings,
+            &git_cache,
             &app.filtered_archived,
             &mut app.list_state_archived,
             "Archived",
@@ -935,11 +1006,11 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
         if at.elapsed().as_secs() < 2 {
             (msg.as_str(), Style::default().fg(theme::STATUS_OK))
         } else {
-            (" 1:CC  2:OC  3:CO  0:all  /: filter  ?: grep  Enter: resume  Ctrl+Y: yolo  Tab  j/k  r  c  x: actions  a: archive  s: settings  Ctrl+R  q",
+            (" 1:CC  2:OC  3:CO  0:all  /: filter  ?: grep  Enter: resume  Ctrl+Y: yolo  Tab  j/k  r  c  x: actions  a: archive  g: git  s: settings  Ctrl+R  q",
              Style::default().fg(theme::STATUS_HELP))
         }
     } else {
-        (" 1:CC  2:OC  3:CO  0:all  /: filter  ?: grep  Enter: resume  Ctrl+Y: yolo  Tab  j/k  r  c  x: actions  a: archive  s: settings  Ctrl+R  q",
+        (" 1:CC  2:OC  3:CO  0:all  /: filter  ?: grep  Enter: resume  Ctrl+Y: yolo  Tab  j/k  r  c  x: actions  a: archive  g: git  s: settings  Ctrl+R  q",
          Style::default().fg(theme::STATUS_HELP))
     };
     f.render_widget(Paragraph::new(status_text).style(status_style), chunks[3]);
@@ -959,6 +1030,7 @@ fn draw_list(
     sessions: &[UnifiedSession],
     pinned: &std::collections::HashSet<String>,
     has_learnings: &std::collections::HashSet<String>,
+    git_cache: &std::collections::HashMap<String, (crate::git_status::GitStatus, Instant)>,
     indices: &[usize],
     list_state: &mut ListState,
     title: &str,
@@ -991,11 +1063,13 @@ fn draw_list(
             } else {
                 Span::raw("  ")
             };
+            let git_span = git_status_span(&s.project_path, git_cache);
             let line = Line::from(vec![
                 pin_span,
                 Span::styled(format!("{} ", dt), theme::dim_style()),
                 Span::styled(format!("{} ", badge_text), Style::default().fg(badge_color)),
                 kb_span,
+                git_span,
                 Span::styled(format!("{:<22}", label), Style::default().fg(theme::FG)),
                 Span::styled(format!("{:>4} ", s.message_count), theme::dim_style()),
                 Span::styled(folder, theme::dim_style()),
@@ -1053,10 +1127,23 @@ fn build_preview_content(app: &AppState) -> String {
                 String::new()
             };
 
-            let branch_line = if !s.git_branch.is_empty() {
-                format!("\nBRANCH:   {}", s.git_branch)
-            } else {
-                String::new()
+            let branch_line = {
+                use crate::git_status::GitStatus;
+                let live = app.git_status.lock().unwrap_or_else(|e| e.into_inner()).get(&s.project_path).map(|(g, _)| g.clone());
+                match live {
+                    Some(GitStatus::Clean { ref branch }) | Some(GitStatus::Dirty { ref branch }) => {
+                        let dirty = matches!(live, Some(GitStatus::Dirty { .. }));
+                        let ran_on = if !s.git_branch.is_empty() && s.git_branch != *branch {
+                            format!("  (ran on {})", s.git_branch)
+                        } else {
+                            String::new()
+                        };
+                        let suffix = if dirty { "  (dirty)" } else { "" };
+                        format!("\nBRANCH:   {}{}{}", branch, ran_on, suffix)
+                    }
+                    _ if !s.git_branch.is_empty() => format!("\nBRANCH:   {}", s.git_branch),
+                    _ => String::new(),
+                }
             };
 
             let first_msg_line = if !s.first_user_msg.is_empty() {
@@ -1135,6 +1222,25 @@ fn draw_preview(f: &mut ratatui::Frame, app: &mut AppState, area: Rect, scroll: 
         .wrap(Wrap { trim: false })
         .scroll((effective_scroll, 0));
     f.render_widget(preview, area);
+}
+
+/// Render the single-column git status glyph for a project path.
+/// Returns a 2-column span: glyph + trailing space. Blank pair when the
+/// cache has no entry yet (pending first check).
+fn git_status_span(
+    path: &str,
+    git_cache: &std::collections::HashMap<String, (crate::git_status::GitStatus, Instant)>,
+) -> Span<'static> {
+    use crate::git_status::GitStatus;
+    use ratatui::style::Color;
+    let (glyph, color) = match git_cache.get(path).map(|(s, _)| s) {
+        Some(GitStatus::Dirty { .. }) => ("●", Color::Red),
+        Some(GitStatus::Clean { .. }) => ("○", Color::Green),
+        Some(GitStatus::NoGit)        => ("·", theme::FG_DIM),
+        Some(GitStatus::Error)        => ("◦", Color::Yellow),
+        None                          => (" ", theme::FG_DIM),
+    };
+    Span::styled(format!("{} ", glyph), Style::default().fg(color))
 }
 
 /// Split `line` into alternating raw and styled spans wherever `query_lc` occurs

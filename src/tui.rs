@@ -22,7 +22,7 @@ use crate::theme;
 enum Focus { ActiveList, ArchivedList, Preview }
 
 #[derive(PartialEq)]
-enum AppMode { Normal, Filter, Grep, Rename, ActionMenu, Settings, Library, LibraryFilter, Projects, ProjectsFilter, TagEdit, LinkPicker, LinkPickerFilter }
+enum AppMode { Normal, Filter, Grep, Rename, ActionMenu, Settings, Library, LibraryFilter, Projects, ProjectsFilter, TagEdit, LinkPicker, LinkPickerFilter, Digest }
 
 #[derive(PartialEq, Copy, Clone)]
 pub enum ProjectSort { LastActive, SessionCount, Alphabetical }
@@ -87,6 +87,8 @@ struct AppState {
     link_picker_filter: String,
     link_picker_filtered: Vec<usize>,
     link_picker_list_state: ListState,
+    digest_text: String,
+    digest_scroll: u16,
     settings: crate::settings::AppSettings,
     // Settings panel state (used by AppMode::Settings, added in Task 6)
     settings_editing: bool,
@@ -158,6 +160,8 @@ impl AppState {
             link_picker_filter: String::new(),
             link_picker_filtered: Vec::new(),
             link_picker_list_state: ListState::default(),
+            digest_text: String::new(),
+            digest_scroll: 0,
             settings,
             settings_editing: false,
             settings_input: String::new(),
@@ -548,6 +552,59 @@ async fn run_event_loop(
                         app.project_filter = None;
                         app.apply_filter();
                         app.status_msg = Some(("Project filter cleared".to_string(), Instant::now()));
+                    }
+
+                    // --- Weekly Digest ---
+                    (AppMode::Normal, _, KeyCode::Char('D')) => {
+                        let conn = app.db.lock().unwrap_or_else(|e| e.into_inner());
+                        let learnings_raw = crate::store::load_all_learnings(&conn).unwrap_or_default();
+                        drop(conn);
+                        let joined: Vec<crate::digest::LearningWithSession> = learnings_raw
+                            .into_iter()
+                            .map(|e| crate::digest::LearningWithSession {
+                                session_id: e.session_id,
+                                category: e.category,
+                                point: e.point,
+                                captured_at: e.captured_at,
+                            })
+                            .collect();
+                        let data = crate::digest::build_digest(
+                            &app.sessions, &joined, 7, std::time::SystemTime::now(),
+                        );
+                        app.digest_text = crate::digest::render_digest(&data);
+                        app.digest_scroll = 0;
+                        app.mode = AppMode::Digest;
+                    }
+                    (AppMode::Digest, _, KeyCode::Esc) => {
+                        app.digest_text.clear();
+                        app.digest_scroll = 0;
+                        app.mode = AppMode::Normal;
+                    }
+                    (AppMode::Digest, _, KeyCode::Down)
+                    | (AppMode::Digest, _, KeyCode::Char('j')) => {
+                        app.digest_scroll = app.digest_scroll.saturating_add(1);
+                    }
+                    (AppMode::Digest, _, KeyCode::Up)
+                    | (AppMode::Digest, _, KeyCode::Char('k')) => {
+                        app.digest_scroll = app.digest_scroll.saturating_sub(1);
+                    }
+                    (AppMode::Digest, _, KeyCode::Char('e')) => {
+                        let vault = app.settings.obsidian_kb_path.clone();
+                        match vault {
+                            Some(path) => {
+                                match crate::obsidian::export_digest(&path, &app.digest_text) {
+                                    Ok(rel) => {
+                                        app.status_msg = Some((format!("Digest exported: {rel}"), Instant::now()));
+                                    }
+                                    Err(e) => {
+                                        app.status_msg = Some((format!("Digest export failed: {e}"), Instant::now()));
+                                    }
+                                }
+                            }
+                            None => {
+                                app.status_msg = Some(("No Obsidian path set — see `s` for settings".to_string(), Instant::now()));
+                            }
+                        }
                     }
 
                     // --- Session linking ---
@@ -1500,6 +1557,10 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
             format!("link picker filter: {}|", app.link_picker_filter),
             " Link Picker — Filter  [Esc: clear  Enter: apply] ",
         ),
+        AppMode::Digest => (
+            "  (j/k: scroll  e: export to Obsidian  Esc: exit)".to_string(),
+            " Weekly Digest — last 7 days ",
+        ),
         AppMode::Normal => {
             let hint = if let Some(ref pp) = app.project_filter {
                 format!("  project: {}  (Esc to clear)", crate::util::path_last_n(pp, 2))
@@ -1528,6 +1589,8 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
         draw_projects(f, app, chunks[1]);
     } else if app.mode == AppMode::LinkPicker || app.mode == AppMode::LinkPickerFilter {
         draw_link_picker(f, app, chunks[1]);
+    } else if app.mode == AppMode::Digest {
+        draw_digest(f, app, chunks[1]);
     } else {
 
     // Main panes: left panel (split active/archived) and right preview
@@ -1610,11 +1673,11 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
         if at.elapsed().as_secs() < 2 {
             (msg.as_str(), Style::default().fg(theme::STATUS_OK))
         } else {
-            (" 1:CC  2:OC  3:CO  0:all  /: filter (#tag)  ?: grep  L: library  P: projects  Enter: resume  Ctrl+Y: yolo  Tab  j/k  r  c  x: actions  t: tag  l: link  u: unlink  a: archive  g: git  s: settings  Ctrl+R  q",
+            (" 1:CC  2:OC  3:CO  0:all  /: filter (#tag)  ?: grep  L: library  P: projects  D: digest  Enter: resume  Ctrl+Y: yolo  Tab  j/k  r  c  x: actions  t: tag  l: link  u: unlink  a: archive  g: git  s: settings  Ctrl+R  q",
              Style::default().fg(theme::STATUS_HELP))
         }
     } else {
-        (" 1:CC  2:OC  3:CO  0:all  /: filter (#tag)  ?: grep  L: library  P: projects  Enter: resume  Ctrl+Y: yolo  Tab  j/k  r  c  x: actions  t: tag  l: link  u: unlink  a: archive  g: git  s: settings  Ctrl+R  q",
+        (" 1:CC  2:OC  3:CO  0:all  /: filter (#tag)  ?: grep  L: library  P: projects  D: digest  Enter: resume  Ctrl+Y: yolo  Tab  j/k  r  c  x: actions  t: tag  l: link  u: unlink  a: archive  g: git  s: settings  Ctrl+R  q",
          Style::default().fg(theme::STATUS_HELP))
     };
     f.render_widget(Paragraph::new(status_text).style(status_style), chunks[3]);
@@ -1626,6 +1689,19 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
     if app.mode == AppMode::Settings {
         draw_settings_popup(f, app, area);
     }
+}
+
+fn draw_digest(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
+    let block = Block::default()
+        .border_type(theme::BORDER_TYPE)
+        .borders(Borders::ALL)
+        .border_style(theme::panel_block_style(theme::BORDER_FOCUSED))
+        .title(Span::styled(" Weekly Digest ", theme::title_style()));
+    let para = Paragraph::new(app.digest_text.as_str())
+        .block(block)
+        .wrap(Wrap { trim: false })
+        .scroll((app.digest_scroll, 0));
+    f.render_widget(para, area);
 }
 
 fn draw_link_picker(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {

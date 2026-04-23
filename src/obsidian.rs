@@ -2,6 +2,27 @@ use anyhow::Result;
 use crate::unified::UnifiedSession;
 use crate::store::LearningPoint;
 
+/// Write a weekly digest markdown file to `<vault>/cc-speedy/digests/YYYY-Www.md`.
+/// Returns the relative path (from vault root) for display.
+pub fn export_digest(vault_path: &str, digest_text: &str) -> Result<String> {
+    use chrono::{Datelike, Local};
+    let now = Local::now();
+    let year = now.iso_week().year();
+    let week = now.iso_week().week();
+    let filename = format!("{}-W{:02}.md", year, week);
+    let rel_dir = std::path::Path::new("cc-speedy").join("digests");
+    let abs_dir = std::path::Path::new(vault_path).join(&rel_dir);
+    std::fs::create_dir_all(&abs_dir)?;
+    let abs_path = abs_dir.join(&filename);
+    let front = format!(
+        "---\ndate: {}\ntype: weekly-digest\ntags: [cc-speedy, digest]\n---\n\n",
+        now.format("%Y-%m-%d"),
+    );
+    let body = format!("{}```\n{}\n```\n", front, digest_text);
+    std::fs::write(&abs_path, body)?;
+    Ok(rel_dir.join(&filename).to_string_lossy().to_string())
+}
+
 /// Write a combined Obsidian Markdown note for a session.
 /// Skips sessions with fewer than 5 messages.
 /// Overwrites the file if it already exists.

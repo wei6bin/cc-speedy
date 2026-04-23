@@ -120,14 +120,17 @@ pub async fn generate_summary(
         existing_text, snippet
     );
 
+    // Note: proxy env vars (ANTHROPIC_AUTH_TOKEN/BASE_URL/MODEL/API_KEY) are
+    // stripped once at process startup in main.rs, so `claude --print` inherits
+    // a clean environment and uses the user's default subscription.
     let output = tokio::time::timeout(
-        std::time::Duration::from_secs(60),
+        std::time::Duration::from_secs(180),
         tokio::process::Command::new("claude")
             .args(["--print", &prompt])
             .output(),
     )
     .await
-    .map_err(|_| anyhow::anyhow!("claude --print timed out after 60 seconds"))?
+    .map_err(|_| anyhow::anyhow!("claude --print timed out after 180 seconds"))?
     .map_err(|e| anyhow::anyhow!("failed to run `claude`: {}", e))?;
 
     if !output.status.success() {

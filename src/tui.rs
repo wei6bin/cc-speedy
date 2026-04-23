@@ -22,7 +22,7 @@ use crate::theme;
 enum Focus { ActiveList, ArchivedList, Preview }
 
 #[derive(PartialEq)]
-enum AppMode { Normal, Filter, Grep, Rename, ActionMenu, Settings, Library, LibraryFilter, Projects, ProjectsFilter }
+enum AppMode { Normal, Filter, Grep, Rename, ActionMenu, Settings, Library, LibraryFilter, Projects, ProjectsFilter, TagEdit }
 
 #[derive(PartialEq, Copy, Clone)]
 pub enum ProjectSort { LastActive, SessionCount, Alphabetical }
@@ -76,6 +76,11 @@ struct AppState {
     projects_list_state: ListState,
     /// When set, only sessions with matching project_path are shown in the main list.
     project_filter: Option<String>,
+    /// Tag cache: session_id → sorted list of normalized tags. Loaded at
+    /// startup, updated on every `set_tags` write.
+    tags_by_session: std::collections::HashMap<String, Vec<String>>,
+    /// Input buffer for TagEdit mode.
+    tag_edit_input: String,
     settings: crate::settings::AppSettings,
     // Settings panel state (used by AppMode::Settings, added in Task 6)
     settings_editing: bool,
@@ -104,6 +109,7 @@ impl AppState {
         let pinned        = crate::store::load_pinned(&conn)?;
         let archived       = crate::store::load_all_archived(&conn)?;
         let has_learnings  = crate::store::load_sessions_with_learnings(&conn)?;
+        let tags_by_session = crate::store::load_all_tags(&conn).unwrap_or_default();
         let settings = crate::settings::load(&conn);
         Ok(Self {
             filtered_active: (0..n).collect(),
@@ -139,6 +145,8 @@ impl AppState {
             projects_sort: ProjectSort::LastActive,
             projects_list_state: ListState::default(),
             project_filter: None,
+            tags_by_session,
+            tag_edit_input: String::new(),
             settings,
             settings_editing: false,
             settings_input: String::new(),
@@ -228,7 +236,11 @@ impl AppState {
     }
 
     fn apply_filter(&mut self) {
-        let q = self.filter.to_lowercase();
+        // Split filter query into tag tokens (#tag) and text tokens.
+        let (tag_tokens, text_tokens) = parse_filter_tokens(&self.filter);
+        let tag_tokens_lc: Vec<String> = tag_tokens.iter().map(|t| t.to_lowercase()).collect();
+        let text_tokens_lc: Vec<String> = text_tokens.iter().map(|t| t.to_lowercase()).collect();
+
         let grep_q = self.grep_query.to_lowercase();
         let grep_active = self.mode == AppMode::Grep && !grep_q.is_empty();
         let pinned = &self.pinned;
@@ -255,9 +267,22 @@ impl AppState {
                     if &s.project_path != pp { return false; }
                 }
                 if !matches_grep(*i) { return false; }
-                q.is_empty()
-                    || s.project_name.to_lowercase().contains(&q)
-                    || s.summary.to_lowercase().contains(&q)
+                // All tag tokens must be present on this session.
+                if !tag_tokens_lc.is_empty() {
+                    let tags = self.tags_by_session.get(&s.session_id);
+                    for wanted in &tag_tokens_lc {
+                        let ok = tags.map(|v| v.iter().any(|t| t == wanted)).unwrap_or(false);
+                        if !ok { return false; }
+                    }
+                }
+                // All text tokens must match title or project_name.
+                for tok in &text_tokens_lc {
+                    if !(s.project_name.to_lowercase().contains(tok)
+                        || s.summary.to_lowercase().contains(tok)) {
+                        return false;
+                    }
+                }
+                true
             })
             .map(|(i, _)| i)
             .collect();
@@ -275,9 +300,22 @@ impl AppState {
                     if &s.project_path != pp { return false; }
                 }
                 if !matches_grep(*i) { return false; }
-                q.is_empty()
-                    || s.project_name.to_lowercase().contains(&q)
-                    || s.summary.to_lowercase().contains(&q)
+                // All tag tokens must be present on this session.
+                if !tag_tokens_lc.is_empty() {
+                    let tags = self.tags_by_session.get(&s.session_id);
+                    for wanted in &tag_tokens_lc {
+                        let ok = tags.map(|v| v.iter().any(|t| t == wanted)).unwrap_or(false);
+                        if !ok { return false; }
+                    }
+                }
+                // All text tokens must match title or project_name.
+                for tok in &text_tokens_lc {
+                    if !(s.project_name.to_lowercase().contains(tok)
+                        || s.summary.to_lowercase().contains(tok)) {
+                        return false;
+                    }
+                }
+                true
             })
             .map(|(i, _)| i)
             .collect();
@@ -326,6 +364,24 @@ impl AppState {
             }
         }
     }
+}
+
+/// Split a filter query into `(tag_tokens, text_tokens)`. Whitespace-delimited
+/// tokens starting with `#` are tag tokens (the `#` stripped); everything else
+/// is a text token. Empty tokens are dropped.
+pub fn parse_filter_tokens(query: &str) -> (Vec<String>, Vec<String>) {
+    let mut tags = Vec::new();
+    let mut texts = Vec::new();
+    for tok in query.split_whitespace() {
+        if let Some(t) = tok.strip_prefix('#') {
+            if !t.is_empty() {
+                tags.push(t.to_string());
+            }
+        } else {
+            texts.push(tok.to_string());
+        }
+    }
+    (tags, texts)
 }
 
 /// Group sessions by `project_path` into Project Dashboard rows.
@@ -455,6 +511,53 @@ async fn run_event_loop(
                         app.project_filter = None;
                         app.apply_filter();
                         app.status_msg = Some(("Project filter cleared".to_string(), Instant::now()));
+                    }
+
+                    // --- Tag edit mode ---
+                    (AppMode::Normal, KeyModifiers::NONE, KeyCode::Char('t')) => {
+                        if let Some(s) = app.selected_session() {
+                            let sid = s.session_id.clone();
+                            let current = app.tags_by_session.get(&sid).cloned().unwrap_or_default();
+                            app.tag_edit_input = current.join(", ");
+                            app.mode = AppMode::TagEdit;
+                        }
+                    }
+                    (AppMode::TagEdit, _, KeyCode::Esc) => {
+                        app.tag_edit_input.clear();
+                        app.mode = AppMode::Normal;
+                    }
+                    (AppMode::TagEdit, _, KeyCode::Enter) => {
+                        let parsed = crate::store::parse_tags(&app.tag_edit_input);
+                        if let Some(sid) = app.selected_session().map(|s| s.session_id.clone()) {
+                            let write_result = crate::store::set_tags(
+                                &app.db.lock().unwrap_or_else(|e| e.into_inner()),
+                                &sid,
+                                &parsed,
+                            );
+                            match write_result {
+                                Ok(()) => {
+                                    if parsed.is_empty() {
+                                        app.tags_by_session.remove(&sid);
+                                    } else {
+                                        app.tags_by_session.insert(sid, parsed);
+                                    }
+                                    app.status_msg = Some(("Tags saved".to_string(), Instant::now()));
+                                    app.apply_filter();
+                                }
+                                Err(e) => {
+                                    app.status_msg = Some((format!("Tag save failed: {e}"), Instant::now()));
+                                }
+                            }
+                        }
+                        app.tag_edit_input.clear();
+                        app.mode = AppMode::Normal;
+                    }
+                    (AppMode::TagEdit, _, KeyCode::Backspace) => {
+                        app.tag_edit_input.pop();
+                    }
+                    (AppMode::TagEdit, KeyModifiers::NONE, KeyCode::Char(c))
+                    | (AppMode::TagEdit, KeyModifiers::SHIFT, KeyCode::Char(c)) => {
+                        app.tag_edit_input.push(c);
                     }
 
                     // --- Project Dashboard mode ---
@@ -1259,6 +1362,10 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
             format!("projects filter: {}|", app.projects_filter),
             " Projects — Filter  [Esc: clear  Enter: apply] ",
         ),
+        AppMode::TagEdit => (
+            format!("tags: {}|", app.tag_edit_input),
+            " Edit Tags  [Enter: save  Esc: cancel] ",
+        ),
         AppMode::Normal => {
             let hint = if let Some(ref pp) = app.project_filter {
                 format!("  project: {}  (Esc to clear)", crate::util::path_last_n(pp, 2))
@@ -1367,11 +1474,11 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
         if at.elapsed().as_secs() < 2 {
             (msg.as_str(), Style::default().fg(theme::STATUS_OK))
         } else {
-            (" 1:CC  2:OC  3:CO  0:all  /: filter  ?: grep  L: library  Enter: resume  Ctrl+Y: yolo  Tab  j/k  r  c  x: actions  a: archive  g: git  s: settings  Ctrl+R  q",
+            (" 1:CC  2:OC  3:CO  0:all  /: filter (#tag ok)  ?: grep  L: library  P: projects  Enter: resume  Ctrl+Y: yolo  Tab  j/k  r  c  x: actions  t: tag  a: archive  g: git  s: settings  Ctrl+R  q",
              Style::default().fg(theme::STATUS_HELP))
         }
     } else {
-        (" 1:CC  2:OC  3:CO  0:all  /: filter  ?: grep  L: library  Enter: resume  Ctrl+Y: yolo  Tab  j/k  r  c  x: actions  a: archive  g: git  s: settings  Ctrl+R  q",
+        (" 1:CC  2:OC  3:CO  0:all  /: filter (#tag ok)  ?: grep  L: library  P: projects  Enter: resume  Ctrl+Y: yolo  Tab  j/k  r  c  x: actions  t: tag  a: archive  g: git  s: settings  Ctrl+R  q",
          Style::default().fg(theme::STATUS_HELP))
     };
     f.render_widget(Paragraph::new(status_text).style(status_style), chunks[3]);
@@ -1627,6 +1734,11 @@ fn build_preview_content(app: &AppState) -> String {
                 }
             };
 
+            let tags_line = match app.tags_by_session.get(&s.session_id) {
+                Some(tags) if !tags.is_empty() => format!("\nTAGS:     {}", tags.join(", ")),
+                _ => String::new(),
+            };
+
             let first_msg_line = if !s.first_user_msg.is_empty() {
                 format!("\nFIRST:    {}", s.first_user_msg)
             } else {
@@ -1646,13 +1758,14 @@ fn build_preview_content(app: &AppState) -> String {
             };
 
             format!(
-                "PROJECT:  {}{}\nMSGS:     {}  |  {}{}{}{}\n\n{}{}",
+                "PROJECT:  {}{}\nMSGS:     {}  |  {}{}{}{}{}\n\n{}{}",
                 s.project_path,
                 file_line,
                 s.message_count,
                 format_time(s.modified),
                 title_line,
                 branch_line,
+                tags_line,
                 first_msg_line,
                 summary,
                 generated_line,

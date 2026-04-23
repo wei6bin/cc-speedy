@@ -50,9 +50,90 @@ pub fn open_db() -> Result<Connection> {
          CREATE TABLE IF NOT EXISTS archived (
              session_id   TEXT PRIMARY KEY,
              archived_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
-         );",
+         );
+         CREATE TABLE IF NOT EXISTS tags (
+             session_id TEXT NOT NULL,
+             tag        TEXT NOT NULL,
+             PRIMARY KEY (session_id, tag)
+         );
+         CREATE INDEX IF NOT EXISTS idx_tags_tag ON tags (tag);",
     )?;
     Ok(conn)
+}
+
+/// Normalize a tag: trim, lowercase, filter to `[a-z0-9-_]`. Returns None for
+/// empty result (caller should skip).
+pub fn normalize_tag(raw: &str) -> Option<String> {
+    let norm: String = raw
+        .trim()
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    if norm.is_empty() { None } else { Some(norm) }
+}
+
+/// Parse a user-typed comma-separated tag string. Returns a deduplicated,
+/// normalized list preserving first-occurrence order.
+pub fn parse_tags(input: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for chunk in input.split(',') {
+        if let Some(t) = normalize_tag(chunk) {
+            if !out.contains(&t) {
+                out.push(t);
+            }
+        }
+    }
+    out
+}
+
+/// Load all tags for one session, alphabetically ordered.
+pub fn load_tags(conn: &Connection, session_id: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT tag FROM tags WHERE session_id = ?1 ORDER BY tag")?;
+    let tags = stmt
+        .query_map(params![session_id], |row| row.get::<_, String>(0))?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(tags)
+}
+
+/// Replace the entire tag set for a session: DELETE + INSERT in one tx.
+pub fn set_tags(conn: &Connection, session_id: &str, tags: &[String]) -> Result<()> {
+    conn.execute("BEGIN", [])?;
+    let run = || -> Result<()> {
+        conn.execute("DELETE FROM tags WHERE session_id = ?1", params![session_id])?;
+        for t in tags {
+            conn.execute(
+                "INSERT OR IGNORE INTO tags (session_id, tag) VALUES (?1, ?2)",
+                params![session_id, t],
+            )?;
+        }
+        Ok(())
+    };
+    match run() {
+        Ok(()) => {
+            conn.execute("COMMIT", [])?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute("ROLLBACK", []);
+            Err(e)
+        }
+    }
+}
+
+/// Load all tags across all sessions: session_id → sorted list of tags.
+pub fn load_all_tags(conn: &Connection) -> Result<HashMap<String, Vec<String>>> {
+    let mut stmt = conn.prepare("SELECT session_id, tag FROM tags ORDER BY session_id, tag")?;
+    let mut out: HashMap<String, Vec<String>> = HashMap::new();
+    for row in stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })? {
+        if let Ok((sid, tag)) = row {
+            out.entry(sid).or_default().push(tag);
+        }
+    }
+    Ok(out)
 }
 
 pub fn load_all_summaries(conn: &Connection) -> Result<HashMap<String, String>> {

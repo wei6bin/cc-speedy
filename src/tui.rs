@@ -22,7 +22,7 @@ use crate::theme;
 enum Focus { ActiveList, ArchivedList, Preview }
 
 #[derive(PartialEq)]
-enum AppMode { Normal, Filter, Rename, PinMenu, Settings }
+enum AppMode { Normal, Filter, Rename, ActionMenu, Settings }
 
 struct AppState {
     sessions: Vec<UnifiedSession>,
@@ -404,57 +404,6 @@ async fn run_event_loop(
                     }
 
                     // n: new conversation in project folder
-                    (AppMode::Normal, KeyModifiers::NONE, KeyCode::Char('n')) => {
-                        if let Some(s) = app.selected_session() {
-                            let path  = s.project_path.clone();
-                            let title = format!("new:{}", crate::util::path_last_n(&path, 1));
-                            let result = match s.source {
-                                SessionSource::ClaudeCode => {
-                                    let name = crate::tmux::new_cc_session_name(&path);
-                                    crate::tmux::new_cc_in_tmux(&name, &path, false, &title)
-                                }
-                                SessionSource::OpenCode => {
-                                    let name = crate::tmux::new_oc_session_name(&path);
-                                    crate::tmux::new_oc_in_tmux(&name, &path, &title)
-                                }
-                                SessionSource::Copilot => {
-                                    let name = crate::tmux::new_copilot_session_name(&path);
-                                    crate::tmux::new_copilot_in_tmux(&name, &path, &title)
-                                }
-                            };
-                            match result {
-                                Ok(()) => return Ok(()),
-                                Err(e) => app.status_msg = Some((format!("Launch failed: {e}"), Instant::now())),
-                            }
-                        }
-                    }
-
-                    // Ctrl+N: new conversation in yolo mode (CC only; OC has no yolo)
-                    (AppMode::Normal, KeyModifiers::CONTROL, KeyCode::Char('n')) => {
-                        if let Some(s) = app.selected_session() {
-                            let path  = s.project_path.clone();
-                            let title = format!("new:{}", crate::util::path_last_n(&path, 1));
-                            let result = match s.source {
-                                SessionSource::ClaudeCode => {
-                                    let name = crate::tmux::new_cc_session_name(&path);
-                                    crate::tmux::new_cc_in_tmux(&name, &path, true, &title)
-                                }
-                                SessionSource::OpenCode => {
-                                    let name = crate::tmux::new_oc_session_name(&path);
-                                    crate::tmux::new_oc_in_tmux(&name, &path, &title)
-                                }
-                                SessionSource::Copilot => {
-                                    let name = crate::tmux::new_copilot_session_name(&path);
-                                    crate::tmux::new_copilot_in_tmux(&name, &path, &title)
-                                }
-                            };
-                            match result {
-                                Ok(()) => return Ok(()),
-                                Err(e) => app.status_msg = Some((format!("Launch failed: {e}"), Instant::now())),
-                            }
-                        }
-                    }
-
                     // Ctrl+Y: yolo mode
                     (AppMode::Normal, KeyModifiers::CONTROL, KeyCode::Char('y')) => {
                         if let Some(s) = app.selected_session() {
@@ -496,7 +445,7 @@ async fn run_event_loop(
                     // x: open pin/unpin popup
                     (AppMode::Normal, KeyModifiers::NONE, KeyCode::Char('x')) => {
                         if app.selected_session().is_some() {
-                            app.mode = AppMode::PinMenu;
+                            app.mode = AppMode::ActionMenu;
                         }
                     }
 
@@ -522,11 +471,11 @@ async fn run_event_loop(
                         }
                     }
 
-                    // --- PinMenu mode ---
-                    (AppMode::PinMenu, _, KeyCode::Esc) => {
+                    // --- ActionMenu mode ---
+                    (AppMode::ActionMenu, _, KeyCode::Esc) => {
                         app.mode = AppMode::Normal;
                     }
-                    (AppMode::PinMenu, _, KeyCode::Char('p')) => {
+                    (AppMode::ActionMenu, _, KeyCode::Char('p')) => {
                         if let Some(id) = app.selected_session().map(|s| s.session_id.clone()) {
                             let newly_pinned = if app.pinned.contains(&id) {
                                 app.pinned.remove(&id);
@@ -543,6 +492,81 @@ async fn run_event_loop(
                             app.apply_filter();
                             let msg = if newly_pinned { "Pinned" } else { "Unpinned" };
                             app.status_msg = Some((msg.to_string(), Instant::now()));
+                        }
+                        app.mode = AppMode::Normal;
+                    }
+                    // n / N: start a new session in the selected folder (lowercase=normal, uppercase=yolo)
+                    (AppMode::ActionMenu, _, KeyCode::Char(k @ ('n' | 'N'))) => {
+                        let yolo = k == 'N';
+                        if let Some(s) = app.selected_session() {
+                            let path  = s.project_path.clone();
+                            let title = format!("new:{}", crate::util::path_last_n(&path, 1));
+                            let result = match s.source {
+                                SessionSource::ClaudeCode => {
+                                    let name = crate::tmux::new_cc_session_name(&path);
+                                    crate::tmux::new_cc_in_tmux(&name, &path, yolo, &title, None)
+                                }
+                                SessionSource::OpenCode => {
+                                    let name = crate::tmux::new_oc_session_name(&path);
+                                    crate::tmux::new_oc_in_tmux(&name, &path, &title, None)
+                                }
+                                SessionSource::Copilot => {
+                                    let name = crate::tmux::new_copilot_session_name(&path);
+                                    crate::tmux::new_copilot_in_tmux(&name, &path, yolo, &title, None)
+                                }
+                            };
+                            match result {
+                                Ok(()) => return Ok(()),
+                                Err(e) => app.status_msg = Some((format!("Launch failed: {e}"), Instant::now())),
+                            }
+                        }
+                        app.mode = AppMode::Normal;
+                    }
+                    // s / S: start a new session with prior summary pre-pasted as context
+                    (AppMode::ActionMenu, _, KeyCode::Char(k @ ('s' | 'S'))) => {
+                        let yolo = k == 'S';
+                        let (path, source, title, combined) = {
+                            let Some(s) = app.selected_session() else {
+                                app.mode = AppMode::Normal;
+                                continue;
+                            };
+                            let id = s.session_id.clone();
+                            let combined = app
+                                .summaries
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .get(&id)
+                                .cloned();
+                            (
+                                s.project_path.clone(),
+                                s.source.clone(),
+                                format!("new:{}", crate::util::path_last_n(&s.project_path, 1)),
+                                combined,
+                            )
+                        };
+                        let Some(combined) = combined else {
+                            app.status_msg = Some(("No summary available — press Ctrl+R to generate first".to_string(), Instant::now()));
+                            app.mode = AppMode::Normal;
+                            continue;
+                        };
+                        let context = crate::summary::build_new_session_context(&combined);
+                        let result = match source {
+                            SessionSource::ClaudeCode => {
+                                let name = crate::tmux::new_cc_session_name(&path);
+                                crate::tmux::new_cc_in_tmux(&name, &path, yolo, &title, Some(&context))
+                            }
+                            SessionSource::OpenCode => {
+                                let name = crate::tmux::new_oc_session_name(&path);
+                                crate::tmux::new_oc_in_tmux(&name, &path, &title, Some(&context))
+                            }
+                            SessionSource::Copilot => {
+                                let name = crate::tmux::new_copilot_session_name(&path);
+                                crate::tmux::new_copilot_in_tmux(&name, &path, yolo, &title, Some(&context))
+                            }
+                        };
+                        match result {
+                            Ok(()) => return Ok(()),
+                            Err(e) => app.status_msg = Some((format!("Launch failed: {e}"), Instant::now())),
                         }
                         app.mode = AppMode::Normal;
                     }
@@ -746,7 +770,7 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
     let (bar_text, bar_title) = match &app.mode {
         AppMode::Filter => (format!("> {}|", app.filter), " Filter "),
         AppMode::Rename => (format!("rename: {}|", app.rename_input), " Rename  [Enter: confirm  Esc: cancel] "),
-        AppMode::PinMenu => ("".to_string(), " cc-speedy "),
+        AppMode::ActionMenu => ("".to_string(), " cc-speedy "),
         AppMode::Settings => ("".to_string(), " cc-speedy — Settings "),
         AppMode::Normal => {
             let hint = if app.filter.is_empty() {
@@ -839,17 +863,17 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
         if at.elapsed().as_secs() < 2 {
             (msg.as_str(), Style::default().fg(theme::STATUS_OK))
         } else {
-            (" 1:CC  2:OC  3:CO  0:all  /: filter  Enter: resume  n: new  Ctrl+Y/N: yolo  Tab  j/k  r  c  x: pin  a: archive  s: settings  Ctrl+R  q",
+            (" 1:CC  2:OC  3:CO  0:all  /: filter  Enter: resume  Ctrl+Y: yolo  Tab  j/k  r  c  x: actions  a: archive  s: settings  Ctrl+R  q",
              Style::default().fg(theme::STATUS_HELP))
         }
     } else {
-        (" 1:CC  2:OC  3:CO  0:all  /: filter  Enter: resume  n: new  Ctrl+Y/N: yolo  Tab  j/k  r  c  x: pin  a: archive  s: settings  Ctrl+R  q",
+        (" 1:CC  2:OC  3:CO  0:all  /: filter  Enter: resume  Ctrl+Y: yolo  Tab  j/k  r  c  x: actions  a: archive  s: settings  Ctrl+R  q",
          Style::default().fg(theme::STATUS_HELP))
     };
     f.render_widget(Paragraph::new(status_text).style(status_style), chunks[3]);
 
     // Overlay popup for pin/unpin
-    if app.mode == AppMode::PinMenu {
+    if app.mode == AppMode::ActionMenu {
         draw_pin_popup(f, app, area);
     }
     if app.mode == AppMode::Settings {
@@ -1024,29 +1048,34 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
 }
 
 fn draw_pin_popup(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
-    let popup_area = centered_rect(44, 6, area);
+    let popup_area = centered_rect(56, 11, area);
     f.render_widget(Clear, popup_area);
 
-    let (session_name, is_pinned) = app.selected_session().map(|s| {
+    let (session_name, is_pinned, has_summary) = app.selected_session().map(|s| {
         let name = if !s.summary.is_empty() {
-            truncate(&s.summary, 32)
+            truncate(&s.summary, 44)
         } else {
-            truncate(&s.project_name, 32)
+            truncate(&s.project_name, 44)
         };
-        (name, app.pinned.contains(&s.session_id))
+        let has = app.summaries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(&s.session_id);
+        (name, app.pinned.contains(&s.session_id), has)
     }).unwrap_or_default();
 
-    let action_label = if is_pinned { "Unpin" } else { "Pin  " };
+    let pin_label = if is_pinned { "Unpin" } else { "Pin" };
+    let summary_suffix = if has_summary { "" } else { "  (no summary)" };
     let content = format!(
-        "\n  {}\n\n  [p] {}    [Esc] Cancel",
-        session_name, action_label
+        "\n  {}\n\n  [p] {}\n  [n] New session here        [N] New + yolo\n  [s] New w/ summary context{}\n  [S] New w/ summary + yolo\n  [Esc] Cancel",
+        session_name, pin_label, summary_suffix
     );
 
     let popup = Paragraph::new(content)
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" Pin / Unpin  (p) ")
+                .title(" Actions ")
                 .border_style(theme::pin_popup_style()),
         )
         .wrap(Wrap { trim: false });

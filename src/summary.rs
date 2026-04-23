@@ -277,6 +277,13 @@ pub fn build_combined_display(factual: &str, learnings: &[crate::store::Learning
     out
 }
 
+/// Wrap a combined summary string with a prefix so the agent treats it as
+/// background context rather than an instruction. Used when launching a new
+/// session with prior-session context pre-pasted into the input.
+pub fn build_new_session_context(combined: &str) -> String {
+    format!("Context from previous session:\n\n{}", combined)
+}
+
 /// Path for OpenCode session summaries.
 /// Stored under ~/.local/share/opencode/summaries/<session-id>.md
 pub fn opencode_summary_path(session_id: &str) -> PathBuf {

@@ -1,4 +1,13 @@
-use cc_speedy::summary::{read_summary, write_summary, summary_path};
+use cc_speedy::summary::{build_new_session_context, read_summary, write_summary, summary_path};
+
+#[test]
+fn test_build_new_session_context_prepends_prefix() {
+    let combined = "## What was done\n- Fixed a bug\n\n── Knowledge Capture ──\n- Decision: X";
+    let ctx = build_new_session_context(combined);
+    assert!(ctx.starts_with("Context from previous session:\n\n"));
+    assert!(ctx.contains("Fixed a bug"));
+    assert!(ctx.contains("Decision: X"));
+}
 use tempfile::TempDir;
 use std::path::PathBuf;
 

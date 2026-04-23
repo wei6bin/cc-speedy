@@ -22,7 +22,7 @@ use crate::theme;
 enum Focus { ActiveList, ArchivedList, Preview }
 
 #[derive(PartialEq)]
-enum AppMode { Normal, Filter, Rename, ActionMenu, Settings }
+enum AppMode { Normal, Filter, Grep, Rename, ActionMenu, Settings }
 
 struct AppState {
     sessions: Vec<UnifiedSession>,
@@ -31,6 +31,10 @@ struct AppState {
     list_state_active: ListState,
     list_state_archived: ListState,
     filter: String,
+    grep_query: String,
+    /// Lowercased haystack per session index — rebuilt on Grep mode entry.
+    /// Empty when Grep mode is inactive.
+    grep_haystacks: Vec<String>,
     mode: AppMode,
     rename_input: String,
     summaries: Arc<Mutex<std::collections::HashMap<String, String>>>,
@@ -80,6 +84,8 @@ impl AppState {
             list_state_active,
             list_state_archived,
             filter: String::new(),
+            grep_query: String::new(),
+            grep_haystacks: Vec::new(),
             mode: AppMode::Normal,
             rename_input: String::new(),
             summaries: Arc::new(Mutex::new(summaries_map)),
@@ -100,21 +106,47 @@ impl AppState {
         })
     }
 
+    /// Rebuild per-session haystacks for grep mode. Each haystack is lowercased
+    /// once so live keystrokes do O(N × len) substring checks with no allocs.
+    fn rebuild_grep_haystacks(&mut self) {
+        let summaries = self.summaries.lock().unwrap_or_else(|e| e.into_inner());
+        self.grep_haystacks = self
+            .sessions
+            .iter()
+            .map(|s| {
+                let summary_body = summaries.get(&s.session_id).map(|v| v.as_str()).unwrap_or("");
+                format!(
+                    "{}\n{}\n{}\n{}",
+                    s.summary, s.project_path, s.git_branch, summary_body,
+                )
+                .to_lowercase()
+            })
+            .collect();
+    }
+
     fn apply_filter(&mut self) {
         let q = self.filter.to_lowercase();
+        let grep_q = self.grep_query.to_lowercase();
+        let grep_active = self.mode == AppMode::Grep && !grep_q.is_empty();
         let pinned = &self.pinned;
         let archived = &self.archived;
+
+        let matches_grep = |idx: usize| -> bool {
+            if !grep_active { return true; }
+            self.grep_haystacks.get(idx).map(|h| h.contains(&grep_q)).unwrap_or(false)
+        };
 
         // Separate into active and archived
         let mut active_indices: Vec<usize> = self
             .sessions
             .iter()
             .enumerate()
-            .filter(|(_, s)| {
+            .filter(|(i, s)| {
                 if archived.contains(&s.session_id) { return false; }
                 if let Some(ref sf) = self.source_filter {
                     if &s.source != sf { return false; }
                 }
+                if !matches_grep(*i) { return false; }
                 q.is_empty()
                     || s.project_name.to_lowercase().contains(&q)
                     || s.summary.to_lowercase().contains(&q)
@@ -126,11 +158,12 @@ impl AppState {
             .sessions
             .iter()
             .enumerate()
-            .filter(|(_, s)| {
+            .filter(|(i, s)| {
                 if !archived.contains(&s.session_id) { return false; }
                 if let Some(ref sf) = self.source_filter {
                     if &s.source != sf { return false; }
                 }
+                if !matches_grep(*i) { return false; }
                 q.is_empty()
                     || s.project_name.to_lowercase().contains(&q)
                     || s.summary.to_lowercase().contains(&q)
@@ -223,6 +256,31 @@ async fn run_event_loop(
                     (_, KeyModifiers::CONTROL, KeyCode::Char('c')) => break,
                     (AppMode::Normal, _, KeyCode::Char('q')) => break,
 
+                    // --- Grep mode ---
+                    (AppMode::Normal, _, KeyCode::Char('?')) => {
+                        app.mode = AppMode::Grep;
+                        app.grep_query.clear();
+                        app.rebuild_grep_haystacks();
+                        app.apply_filter();
+                    }
+                    (AppMode::Grep, _, KeyCode::Esc) => {
+                        app.mode = AppMode::Normal;
+                        app.grep_query.clear();
+                        app.grep_haystacks.clear();
+                        app.apply_filter();
+                    }
+                    (AppMode::Grep, _, KeyCode::Backspace) => {
+                        app.grep_query.pop();
+                        app.apply_filter();
+                    }
+                    (AppMode::Grep, _, KeyCode::Enter) => {
+                        // no-op: live filter, nothing to submit
+                    }
+                    (AppMode::Grep, _, KeyCode::Char(c)) => {
+                        app.grep_query.push(c);
+                        app.apply_filter();
+                    }
+
                     // --- Filter mode ---
                     (AppMode::Normal, _, KeyCode::Char('/')) => {
                         app.mode = AppMode::Filter;
@@ -289,7 +347,8 @@ async fn run_event_loop(
 
                     (AppMode::Normal, _, KeyCode::Down)
                     | (AppMode::Normal, _, KeyCode::Char('j'))
-                    | (AppMode::Filter, _, KeyCode::Down) => {
+                    | (AppMode::Filter, _, KeyCode::Down)
+                    | (AppMode::Grep, _, KeyCode::Down) => {
                         if app.focus == Focus::Preview {
                             app.preview_scroll = app.preview_scroll.saturating_add(1);
                         } else if app.focus == Focus::ActiveList {
@@ -312,7 +371,8 @@ async fn run_event_loop(
                     }
                     (AppMode::Normal, _, KeyCode::Up)
                     | (AppMode::Normal, _, KeyCode::Char('k'))
-                    | (AppMode::Filter, _, KeyCode::Up) => {
+                    | (AppMode::Filter, _, KeyCode::Up)
+                    | (AppMode::Grep, _, KeyCode::Up) => {
                         if app.focus == Focus::Preview {
                             app.preview_scroll = app.preview_scroll.saturating_sub(1);
                         } else if app.focus == Focus::ActiveList {
@@ -766,15 +826,22 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
         ])
         .split(area);
 
-    // Top bar: filter / rename input / idle hint
+    // Top bar: filter / grep / rename input / idle hint
     let (bar_text, bar_title) = match &app.mode {
         AppMode::Filter => (format!("> {}|", app.filter), " Filter "),
+        AppMode::Grep => {
+            let n = app.filtered_active.len() + app.filtered_archived.len();
+            (
+                format!("grep: {}|  ({} match{})", app.grep_query, n, if n == 1 { "" } else { "es" }),
+                " Grep  [Esc: exit] ",
+            )
+        }
         AppMode::Rename => (format!("rename: {}|", app.rename_input), " Rename  [Enter: confirm  Esc: cancel] "),
         AppMode::ActionMenu => ("".to_string(), " cc-speedy "),
         AppMode::Settings => ("".to_string(), " cc-speedy — Settings "),
         AppMode::Normal => {
             let hint = if app.filter.is_empty() {
-                "  (press / to filter)".to_string()
+                "  (press / to filter, ? to grep)".to_string()
             } else {
                 format!("  filter: {}", app.filter)
             };
@@ -863,11 +930,11 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
         if at.elapsed().as_secs() < 2 {
             (msg.as_str(), Style::default().fg(theme::STATUS_OK))
         } else {
-            (" 1:CC  2:OC  3:CO  0:all  /: filter  Enter: resume  Ctrl+Y: yolo  Tab  j/k  r  c  x: actions  a: archive  s: settings  Ctrl+R  q",
+            (" 1:CC  2:OC  3:CO  0:all  /: filter  ?: grep  Enter: resume  Ctrl+Y: yolo  Tab  j/k  r  c  x: actions  a: archive  s: settings  Ctrl+R  q",
              Style::default().fg(theme::STATUS_HELP))
         }
     } else {
-        (" 1:CC  2:OC  3:CO  0:all  /: filter  Enter: resume  Ctrl+Y: yolo  Tab  j/k  r  c  x: actions  a: archive  s: settings  Ctrl+R  q",
+        (" 1:CC  2:OC  3:CO  0:all  /: filter  ?: grep  Enter: resume  Ctrl+Y: yolo  Tab  j/k  r  c  x: actions  a: archive  s: settings  Ctrl+R  q",
          Style::default().fg(theme::STATUS_HELP))
     };
     f.render_widget(Paragraph::new(status_text).style(status_style), chunks[3]);
@@ -1024,6 +1091,30 @@ fn build_preview_content(app: &AppState) -> String {
 fn draw_preview(f: &mut ratatui::Frame, app: &mut AppState, area: Rect, scroll: u16) {
     let content = build_preview_content(app);
 
+    let grep_q_lc: String = if app.mode == AppMode::Grep && !app.grep_query.is_empty() {
+        app.grep_query.to_lowercase()
+    } else {
+        String::new()
+    };
+
+    // Auto-scroll to first match only on selection change (preview_scroll reset to 0
+    // on Up/Down); if the user has manually scrolled (non-zero), respect it.
+    let effective_scroll = if !grep_q_lc.is_empty() && scroll == 0 {
+        content
+            .lines()
+            .position(|l| l.to_lowercase().contains(&grep_q_lc))
+            .map(|p| p as u16)
+            .unwrap_or(0)
+    } else {
+        scroll
+    };
+
+    let lines: Vec<Line> = if grep_q_lc.is_empty() {
+        content.lines().map(|l| Line::from(l.to_string())).collect()
+    } else {
+        content.lines().map(|l| highlight_line(l, &grep_q_lc)).collect()
+    };
+
     let focused = app.focus == Focus::Preview;
     let border_color = if focused { theme::BORDER_FOCUSED } else { theme::BORDER_PREVIEW };
     let block = Block::default()
@@ -1034,11 +1125,39 @@ fn draw_preview(f: &mut ratatui::Frame, app: &mut AppState, area: Rect, scroll: 
             if focused { " Summary  [Tab: back to list] " } else { " Summary  [Tab: scroll] " },
             theme::title_style(),
         ));
-    let preview = Paragraph::new(content)
+    let preview = Paragraph::new(lines)
         .block(block)
         .wrap(Wrap { trim: false })
-        .scroll((scroll, 0));
+        .scroll((effective_scroll, 0));
     f.render_widget(preview, area);
+}
+
+/// Split `line` into alternating raw and styled spans wherever `query_lc` occurs
+/// case-insensitively. Bails to a single raw span if lowercasing would change
+/// the byte length (non-ASCII), since byte-offset indexing would misalign.
+pub fn highlight_line(line: &str, query_lc: &str) -> Line<'static> {
+    if query_lc.is_empty() {
+        return Line::from(line.to_string());
+    }
+    let lc = line.to_lowercase();
+    if lc.len() != line.len() {
+        return Line::from(line.to_string());
+    }
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(rel) = lc[cursor..].find(query_lc) {
+        let abs = cursor + rel;
+        if abs > cursor {
+            spans.push(Span::raw(line[cursor..abs].to_string()));
+        }
+        let end = abs + query_lc.len();
+        spans.push(Span::styled(line[abs..end].to_string(), theme::grep_match_style()));
+        cursor = end;
+    }
+    if cursor < line.len() {
+        spans.push(Span::raw(line[cursor..].to_string()));
+    }
+    Line::from(spans)
 }
 
 fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {

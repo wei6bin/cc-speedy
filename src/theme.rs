@@ -75,3 +75,12 @@ pub fn pin_style() -> Style {
 pub fn pin_popup_style() -> Style {
     Style::default().fg(Color::Magenta)
 }
+
+/// Highlight style for grep-mode substring hits in the preview pane.
+/// Yellow background + black text — high contrast but still readable.
+pub fn grep_match_style() -> Style {
+    Style::default()
+        .fg(Color::Black)
+        .bg(Color::Rgb(212, 160, 23))
+        .add_modifier(Modifier::BOLD)
+}

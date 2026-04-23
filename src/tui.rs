@@ -22,7 +22,7 @@ use crate::theme;
 enum Focus { ActiveList, ArchivedList, Preview }
 
 #[derive(PartialEq)]
-enum AppMode { Normal, Filter, Grep, Rename, ActionMenu, Settings, Library, LibraryFilter, Projects, ProjectsFilter, TagEdit }
+enum AppMode { Normal, Filter, Grep, Rename, ActionMenu, Settings, Library, LibraryFilter, Projects, ProjectsFilter, TagEdit, LinkPicker, LinkPickerFilter }
 
 #[derive(PartialEq, Copy, Clone)]
 pub enum ProjectSort { LastActive, SessionCount, Alphabetical }
@@ -81,6 +81,12 @@ struct AppState {
     tags_by_session: std::collections::HashMap<String, Vec<String>>,
     /// Input buffer for TagEdit mode.
     tag_edit_input: String,
+    /// Session linking: child → parent map. Updated on set_link / unset_link.
+    parent_of: std::collections::HashMap<String, String>,
+    /// LinkPicker state.
+    link_picker_filter: String,
+    link_picker_filtered: Vec<usize>,
+    link_picker_list_state: ListState,
     settings: crate::settings::AppSettings,
     // Settings panel state (used by AppMode::Settings, added in Task 6)
     settings_editing: bool,
@@ -110,6 +116,7 @@ impl AppState {
         let archived       = crate::store::load_all_archived(&conn)?;
         let has_learnings  = crate::store::load_sessions_with_learnings(&conn)?;
         let tags_by_session = crate::store::load_all_tags(&conn).unwrap_or_default();
+        let parent_of = crate::store::load_all_links(&conn).unwrap_or_default();
         let settings = crate::settings::load(&conn);
         Ok(Self {
             filtered_active: (0..n).collect(),
@@ -147,11 +154,41 @@ impl AppState {
             project_filter: None,
             tags_by_session,
             tag_edit_input: String::new(),
+            parent_of,
+            link_picker_filter: String::new(),
+            link_picker_filtered: Vec::new(),
+            link_picker_list_state: ListState::default(),
             settings,
             settings_editing: false,
             settings_input: String::new(),
             settings_error: None,
         })
+    }
+
+    /// Rebuild `link_picker_filtered` — every session except the currently
+    /// selected one, substring-matched against `link_picker_filter`.
+    fn apply_link_picker_filter(&mut self) {
+        let current = self.selected_session().map(|s| s.session_id.clone());
+        let q = self.link_picker_filter.to_lowercase();
+        self.link_picker_filtered = self
+            .sessions
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| {
+                if current.as_ref().map(|id| id == &s.session_id).unwrap_or(false) {
+                    return false;
+                }
+                q.is_empty()
+                    || s.summary.to_lowercase().contains(&q)
+                    || s.project_name.to_lowercase().contains(&q)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if self.link_picker_filtered.is_empty() {
+            self.link_picker_list_state.select(None);
+        } else {
+            self.link_picker_list_state.select(Some(0));
+        }
     }
 
     /// Rebuild the `projects` list by grouping sessions on project_path.
@@ -511,6 +548,91 @@ async fn run_event_loop(
                         app.project_filter = None;
                         app.apply_filter();
                         app.status_msg = Some(("Project filter cleared".to_string(), Instant::now()));
+                    }
+
+                    // --- Session linking ---
+                    (AppMode::Normal, KeyModifiers::NONE, KeyCode::Char('l')) => {
+                        if app.selected_session().is_some() {
+                            app.link_picker_filter.clear();
+                            app.apply_link_picker_filter();
+                            app.mode = AppMode::LinkPicker;
+                        }
+                    }
+                    (AppMode::Normal, KeyModifiers::NONE, KeyCode::Char('u')) => {
+                        if let Some(sid) = app.selected_session().map(|s| s.session_id.clone()) {
+                            let removed = app.parent_of.remove(&sid).is_some();
+                            if removed {
+                                let _ = crate::store::unset_link(
+                                    &app.db.lock().unwrap_or_else(|e| e.into_inner()),
+                                    &sid,
+                                );
+                                app.status_msg = Some(("Link removed".to_string(), Instant::now()));
+                            }
+                        }
+                    }
+                    (AppMode::LinkPicker, _, KeyCode::Esc) => {
+                        app.link_picker_filter.clear();
+                        app.link_picker_filtered.clear();
+                        app.mode = AppMode::Normal;
+                    }
+                    (AppMode::LinkPicker, _, KeyCode::Char('/')) => {
+                        app.mode = AppMode::LinkPickerFilter;
+                    }
+                    (AppMode::LinkPicker, _, KeyCode::Down)
+                    | (AppMode::LinkPicker, _, KeyCode::Char('j')) => {
+                        let n = app.link_picker_filtered.len();
+                        if n > 0 {
+                            let i = app.link_picker_list_state.selected().unwrap_or(0);
+                            app.link_picker_list_state.select(Some((i + 1).min(n - 1)));
+                        }
+                    }
+                    (AppMode::LinkPicker, _, KeyCode::Up)
+                    | (AppMode::LinkPicker, _, KeyCode::Char('k')) => {
+                        let i = app.link_picker_list_state.selected().unwrap_or(0);
+                        app.link_picker_list_state.select(Some(i.saturating_sub(1)));
+                    }
+                    (AppMode::LinkPicker, _, KeyCode::Enter) => {
+                        let child = app.selected_session().map(|s| s.session_id.clone());
+                        let parent = app
+                            .link_picker_list_state
+                            .selected()
+                            .and_then(|li| app.link_picker_filtered.get(li).copied())
+                            .and_then(|si| app.sessions.get(si))
+                            .map(|s| s.session_id.clone());
+                        if let (Some(cid), Some(pid)) = (child, parent) {
+                            match crate::store::set_link(
+                                &app.db.lock().unwrap_or_else(|e| e.into_inner()),
+                                &cid, &pid,
+                            ) {
+                                Ok(()) => {
+                                    app.parent_of.insert(cid, pid);
+                                    app.status_msg = Some(("Linked".to_string(), Instant::now()));
+                                }
+                                Err(e) => {
+                                    app.status_msg = Some((format!("Link failed: {e}"), Instant::now()));
+                                }
+                            }
+                        }
+                        app.link_picker_filter.clear();
+                        app.link_picker_filtered.clear();
+                        app.mode = AppMode::Normal;
+                    }
+                    (AppMode::LinkPickerFilter, _, KeyCode::Esc) => {
+                        app.link_picker_filter.clear();
+                        app.apply_link_picker_filter();
+                        app.mode = AppMode::LinkPicker;
+                    }
+                    (AppMode::LinkPickerFilter, _, KeyCode::Enter) => {
+                        app.mode = AppMode::LinkPicker;
+                    }
+                    (AppMode::LinkPickerFilter, _, KeyCode::Backspace) => {
+                        app.link_picker_filter.pop();
+                        app.apply_link_picker_filter();
+                    }
+                    (AppMode::LinkPickerFilter, KeyModifiers::NONE, KeyCode::Char(c))
+                    | (AppMode::LinkPickerFilter, KeyModifiers::SHIFT, KeyCode::Char(c)) => {
+                        app.link_picker_filter.push(c);
+                        app.apply_link_picker_filter();
                     }
 
                     // --- Tag edit mode ---
@@ -1366,6 +1488,18 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
             format!("tags: {}|", app.tag_edit_input),
             " Edit Tags  [Enter: save  Esc: cancel] ",
         ),
+        AppMode::LinkPicker => {
+            let n = app.link_picker_filtered.len();
+            (
+                format!("  pick parent session  ·  {} candidate{}  (/: filter  Enter: link  Esc: cancel)",
+                        n, if n == 1 { "" } else { "s" }),
+                " Link — Pick Parent ",
+            )
+        }
+        AppMode::LinkPickerFilter => (
+            format!("link picker filter: {}|", app.link_picker_filter),
+            " Link Picker — Filter  [Esc: clear  Enter: apply] ",
+        ),
         AppMode::Normal => {
             let hint = if let Some(ref pp) = app.project_filter {
                 format!("  project: {}  (Esc to clear)", crate::util::path_last_n(pp, 2))
@@ -1392,6 +1526,8 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
         draw_library(f, app, chunks[1]);
     } else if app.mode == AppMode::Projects || app.mode == AppMode::ProjectsFilter {
         draw_projects(f, app, chunks[1]);
+    } else if app.mode == AppMode::LinkPicker || app.mode == AppMode::LinkPickerFilter {
+        draw_link_picker(f, app, chunks[1]);
     } else {
 
     // Main panes: left panel (split active/archived) and right preview
@@ -1474,11 +1610,11 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
         if at.elapsed().as_secs() < 2 {
             (msg.as_str(), Style::default().fg(theme::STATUS_OK))
         } else {
-            (" 1:CC  2:OC  3:CO  0:all  /: filter (#tag ok)  ?: grep  L: library  P: projects  Enter: resume  Ctrl+Y: yolo  Tab  j/k  r  c  x: actions  t: tag  a: archive  g: git  s: settings  Ctrl+R  q",
+            (" 1:CC  2:OC  3:CO  0:all  /: filter (#tag)  ?: grep  L: library  P: projects  Enter: resume  Ctrl+Y: yolo  Tab  j/k  r  c  x: actions  t: tag  l: link  u: unlink  a: archive  g: git  s: settings  Ctrl+R  q",
              Style::default().fg(theme::STATUS_HELP))
         }
     } else {
-        (" 1:CC  2:OC  3:CO  0:all  /: filter (#tag ok)  ?: grep  L: library  P: projects  Enter: resume  Ctrl+Y: yolo  Tab  j/k  r  c  x: actions  t: tag  a: archive  g: git  s: settings  Ctrl+R  q",
+        (" 1:CC  2:OC  3:CO  0:all  /: filter (#tag)  ?: grep  L: library  P: projects  Enter: resume  Ctrl+Y: yolo  Tab  j/k  r  c  x: actions  t: tag  l: link  u: unlink  a: archive  g: git  s: settings  Ctrl+R  q",
          Style::default().fg(theme::STATUS_HELP))
     };
     f.render_widget(Paragraph::new(status_text).style(status_style), chunks[3]);
@@ -1490,6 +1626,44 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
     if app.mode == AppMode::Settings {
         draw_settings_popup(f, app, area);
     }
+}
+
+fn draw_link_picker(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
+    let items: Vec<ListItem> = app
+        .link_picker_filtered
+        .iter()
+        .filter_map(|&si| app.sessions.get(si))
+        .map(|s| {
+            let (badge_text, badge_color) = match s.source {
+                SessionSource::ClaudeCode => ("[CC]", theme::CC_BADGE),
+                SessionSource::OpenCode => ("[OC]", theme::OC_BADGE),
+                SessionSource::Copilot => ("[CO]", theme::CO_BADGE),
+            };
+            let title = if !s.summary.is_empty() { truncate(&s.summary, 40) } else { s.project_name.clone() };
+            Line::from(vec![
+                Span::styled(format!("{} ", format_time(s.modified)), theme::dim_style()),
+                Span::styled(format!("{} ", badge_text), Style::default().fg(badge_color)),
+                Span::styled(title, Style::default().fg(theme::FG)),
+                Span::styled(format!("   {}", crate::util::path_last_n(&s.project_path, 2)), theme::dim_style()),
+            ])
+        })
+        .map(ListItem::new)
+        .collect();
+
+    let title = format!(" Link — Pick Parent  ({} candidate{}) ",
+        items.len(), if items.len() == 1 { "" } else { "s" });
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .border_type(theme::BORDER_TYPE)
+                .borders(Borders::ALL)
+                .border_style(theme::panel_block_style(theme::BORDER_FOCUSED))
+                .title(Span::styled(title, theme::title_style())),
+        )
+        .highlight_style(
+            Style::default().bg(theme::SEL_BG).fg(theme::SEL_FG).add_modifier(ratatui::style::Modifier::BOLD),
+        );
+    f.render_stateful_widget(list, area, &mut app.link_picker_list_state);
 }
 
 fn draw_projects(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
@@ -1739,6 +1913,53 @@ fn build_preview_content(app: &AppState) -> String {
                 _ => String::new(),
             };
 
+            let parent_line = app
+                .parent_of
+                .get(&s.session_id)
+                .and_then(|pid| app.sessions.iter().find(|x| &x.session_id == pid))
+                .map(|p| {
+                    let badge = match p.source {
+                        SessionSource::ClaudeCode => "[CC]",
+                        SessionSource::OpenCode => "[OC]",
+                        SessionSource::Copilot => "[CO]",
+                    };
+                    let title = if !p.summary.is_empty() { truncate(&p.summary, 40) } else { p.project_name.clone() };
+                    format!("\nPARENT:   {} {} {}", format_time(p.modified), badge, title)
+                })
+                .unwrap_or_default();
+
+            let children_line = {
+                let child_ids: Vec<&String> = app
+                    .parent_of
+                    .iter()
+                    .filter(|(_, pid)| pid.as_str() == s.session_id.as_str())
+                    .map(|(cid, _)| cid)
+                    .collect();
+                if child_ids.is_empty() {
+                    String::new()
+                } else {
+                    let mut entries: Vec<String> = child_ids
+                        .iter()
+                        .filter_map(|cid| app.sessions.iter().find(|x| &x.session_id == *cid))
+                        .map(|c| {
+                            let badge = match c.source {
+                                SessionSource::ClaudeCode => "[CC]",
+                                SessionSource::OpenCode => "[OC]",
+                                SessionSource::Copilot => "[CO]",
+                            };
+                            let title = if !c.summary.is_empty() { truncate(&c.summary, 40) } else { c.project_name.clone() };
+                            (c.modified, format!("          {} {} {}", format_time(c.modified), badge, title))
+                        })
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .map(|(_, line)| line)
+                        .collect();
+                    entries.sort();
+                    let header = format!("\nCHILDREN: ({})", child_ids.len());
+                    format!("{}\n{}", header, entries.join("\n"))
+                }
+            };
+
             let first_msg_line = if !s.first_user_msg.is_empty() {
                 format!("\nFIRST:    {}", s.first_user_msg)
             } else {
@@ -1758,7 +1979,7 @@ fn build_preview_content(app: &AppState) -> String {
             };
 
             format!(
-                "PROJECT:  {}{}\nMSGS:     {}  |  {}{}{}{}{}\n\n{}{}",
+                "PROJECT:  {}{}\nMSGS:     {}  |  {}{}{}{}{}{}{}\n\n{}{}",
                 s.project_path,
                 file_line,
                 s.message_count,
@@ -1766,6 +1987,8 @@ fn build_preview_content(app: &AppState) -> String {
                 title_line,
                 branch_line,
                 tags_line,
+                parent_line,
+                children_line,
                 first_msg_line,
                 summary,
                 generated_line,

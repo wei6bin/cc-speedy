@@ -56,9 +56,46 @@ pub fn open_db() -> Result<Connection> {
              tag        TEXT NOT NULL,
              PRIMARY KEY (session_id, tag)
          );
-         CREATE INDEX IF NOT EXISTS idx_tags_tag ON tags (tag);",
+         CREATE INDEX IF NOT EXISTS idx_tags_tag ON tags (tag);
+         CREATE TABLE IF NOT EXISTS links (
+             session_id        TEXT PRIMARY KEY,
+             parent_session_id TEXT NOT NULL,
+             linked_at         INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+         );
+         CREATE INDEX IF NOT EXISTS idx_links_parent ON links (parent_session_id);",
     )?;
     Ok(conn)
+}
+
+/// Link one session to a parent. Replaces any existing link. Refuses self-link.
+pub fn set_link(conn: &Connection, child_id: &str, parent_id: &str) -> Result<()> {
+    if child_id == parent_id {
+        anyhow::bail!("cannot link a session to itself");
+    }
+    conn.execute(
+        "INSERT INTO links (session_id, parent_session_id) VALUES (?1, ?2)
+         ON CONFLICT(session_id) DO UPDATE SET parent_session_id = excluded.parent_session_id, linked_at = strftime('%s','now')",
+        params![child_id, parent_id],
+    )?;
+    Ok(())
+}
+
+/// Remove the link row for a session. No-op if not linked.
+pub fn unset_link(conn: &Connection, child_id: &str) -> Result<()> {
+    conn.execute("DELETE FROM links WHERE session_id = ?1", params![child_id])?;
+    Ok(())
+}
+
+/// Load the child → parent map for every linked session.
+pub fn load_all_links(conn: &Connection) -> Result<HashMap<String, String>> {
+    let mut stmt = conn.prepare("SELECT session_id, parent_session_id FROM links")?;
+    let map = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(map)
 }
 
 /// Normalize a tag: trim, lowercase, filter to `[a-z0-9-_]`. Returns None for

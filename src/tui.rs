@@ -273,10 +273,11 @@ async fn run_event_loop(
                         app.grep_query.pop();
                         app.apply_filter();
                     }
-                    (AppMode::Grep, _, KeyCode::Enter) => {
-                        // no-op: live filter, nothing to submit
-                    }
-                    (AppMode::Grep, _, KeyCode::Char(c)) => {
+                    // Only NONE/SHIFT chars go into the query; Ctrl/Alt+char fall
+                    // through to the action handlers below (Ctrl+R regen, Ctrl+Y
+                    // yolo, etc.), so those shortcuts still work during grep.
+                    (AppMode::Grep, KeyModifiers::NONE, KeyCode::Char(c))
+                    | (AppMode::Grep, KeyModifiers::SHIFT, KeyCode::Char(c)) => {
                         app.grep_query.push(c);
                         app.apply_filter();
                     }
@@ -337,7 +338,8 @@ async fn run_event_loop(
                     }
 
                     // --- Normal navigation ---
-                    (AppMode::Normal, _, KeyCode::Tab) => {
+                    (AppMode::Normal, _, KeyCode::Tab)
+                    | (AppMode::Grep, _, KeyCode::Tab) => {
                         app.focus = match app.focus {
                             Focus::ActiveList => Focus::ArchivedList,
                             Focus::ArchivedList => Focus::Preview,
@@ -389,7 +391,8 @@ async fn run_event_loop(
                     }
 
                     // Ctrl+R: regenerate summary + knowledge extraction
-                    (AppMode::Normal, KeyModifiers::CONTROL, KeyCode::Char('r')) => {
+                    (AppMode::Normal, KeyModifiers::CONTROL, KeyCode::Char('r'))
+                    | (AppMode::Grep, KeyModifiers::CONTROL, KeyCode::Char('r')) => {
                         if let Some(s) = app.selected_session() {
                             let id           = s.session_id.clone();
                             let jsonl        = s.jsonl_path.clone();
@@ -437,7 +440,8 @@ async fn run_event_loop(
                         app.apply_filter();
                     }
 
-                    (AppMode::Normal, _, KeyCode::Enter) => {
+                    (AppMode::Normal, _, KeyCode::Enter)
+                    | (AppMode::Grep, _, KeyCode::Enter) => {
                         if let Some(s) = app.selected_session() {
                             let path  = s.project_path.clone();
                             let id    = s.session_id.clone();
@@ -465,7 +469,8 @@ async fn run_event_loop(
 
                     // n: new conversation in project folder
                     // Ctrl+Y: yolo mode
-                    (AppMode::Normal, KeyModifiers::CONTROL, KeyCode::Char('y')) => {
+                    (AppMode::Normal, KeyModifiers::CONTROL, KeyCode::Char('y'))
+                    | (AppMode::Grep, KeyModifiers::CONTROL, KeyCode::Char('y')) => {
                         if let Some(s) = app.selected_session() {
                             let path  = s.project_path.clone();
                             let id    = s.session_id.clone();

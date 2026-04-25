@@ -74,7 +74,7 @@ pub fn build_dedupe_eval_code(marker: &str) -> String {
         })
         .collect();
     format!(
-        r#"(()=>{{const t=window.moment().format('YYYY-MM-DD');const f=app.vault.getMarkdownFiles().find(x=>x.basename===t);return !!(f && (await app.vault.read(f)).includes("{}"))}})()"#,
+        r#"(async()=>{{const t=window.moment().format('YYYY-MM-DD');const f=app.vault.getMarkdownFiles().find(x=>x.basename===t);return !!(f && (await app.vault.read(f)).includes("{}"))}})()"#,
         escaped,
     )
 }

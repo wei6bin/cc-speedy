@@ -71,3 +71,13 @@ fn test_dedupe_eval_uses_today_moment() {
         js
     );
 }
+
+#[test]
+fn test_dedupe_eval_is_async() {
+    let js = build_dedupe_eval_code("anything");
+    assert!(
+        js.starts_with("(async()=>"),
+        "IIFE must be async to use await: {}",
+        js
+    );
+}

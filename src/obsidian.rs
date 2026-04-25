@@ -113,15 +113,16 @@ pub fn export_to_obsidian(
     }
 
     let date_str = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let last_exported = chrono::Local::now()
+        .format("%Y-%m-%dT%H:%M:%S%z")
+        .to_string();
 
-    // Project slug: last 2 path segments, slashes → dashes, sanitised
     let project_slug: String = crate::util::path_last_n(&session.project_path, 2)
         .replace('/', "-")
         .chars()
         .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
         .collect();
 
-    // First 8 alphanumeric-or-dash chars of session_id
     let id_prefix: String = session
         .session_id
         .chars()
@@ -132,14 +133,52 @@ pub fn export_to_obsidian(
     let filename = format!("{}-{}-{}.md", date_str, project_slug, id_prefix);
     let file_path = std::path::Path::new(vault_path).join(&filename);
 
-    let front_matter = format!(
-        "---\ndate: {}\nproject: \"{}\"\nsession_id: \"{}\"\ntags: [agent-session]\n---\n\n",
-        date_str,
-        session.project_path.replace('"', "\\\""),
-        session.session_id.replace('"', "\\\""),
-    );
+    let source_str = match session.source {
+        crate::unified::SessionSource::ClaudeCode => "cc",
+        crate::unified::SessionSource::OpenCode => "oc",
+        crate::unified::SessionSource::Copilot => "co",
+    };
+    let status = parse_status_from_factual(factual);
+    let project_name = crate::util::path_last_n(&session.project_path, 1);
+    let tags = build_frontmatter_tags(source_str, status, learnings);
 
-    let mut content = format!("{}{}", front_matter, factual);
+    let mut front = String::new();
+    front.push_str("---\n");
+    front.push_str(&format!("date: {}\n", date_str));
+    front.push_str(&format!(
+        "project: \"{}\"\n",
+        session.project_path.replace('"', "\\\"")
+    ));
+    front.push_str(&format!(
+        "project_name: \"{}\"\n",
+        project_name.replace('"', "\\\"")
+    ));
+    front.push_str(&format!(
+        "session_id: \"{}\"\n",
+        session.session_id.replace('"', "\\\"")
+    ));
+    front.push_str(&format!("source: \"{}\"\n", source_str));
+    front.push_str(&format!("status: \"{}\"\n", status));
+    front.push_str(&format!("message_count: {}\n", session.message_count));
+    front.push_str(&format!("learnings_count: {}\n", learnings.len()));
+    if !session.git_branch.is_empty() {
+        front.push_str(&format!(
+            "git_branch: \"{}\"\n",
+            session.git_branch.replace('"', "\\\"")
+        ));
+    }
+    front.push_str(&format!("last_exported: {}\n", last_exported));
+    front.push_str("tags: [");
+    for (i, t) in tags.iter().enumerate() {
+        if i > 0 {
+            front.push_str(", ");
+        }
+        front.push_str(t);
+    }
+    front.push_str("]\n");
+    front.push_str("---\n\n");
+
+    let mut content = format!("{}{}", front, factual);
 
     if !learnings.is_empty() {
         content.push_str("\n\n---\n");

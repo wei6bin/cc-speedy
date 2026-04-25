@@ -37,7 +37,7 @@ fn test_export_writes_markdown_file() {
     ];
     export_to_obsidian(
         &session,
-        "## What was done\n- fixed bug",
+        "## What was done\n- fixed bug\n\n## Status\nCompleted\n",
         &learnings,
         tmp.path().to_str().unwrap(),
     )
@@ -49,14 +49,51 @@ fn test_export_writes_markdown_file() {
         .collect();
     assert_eq!(files.len(), 1);
     let content = std::fs::read_to_string(files[0].path()).unwrap();
+    // Original frontmatter fields still present.
     assert!(content.contains("session_id: \"abc12345-test\""));
     assert!(content.contains("project: \"/home/user/ai/cc-speedy\""));
-    assert!(content.contains("tags: [agent-session]"));
+    // New frontmatter fields.
+    assert!(
+        content.contains("project_name: \"cc-speedy\""),
+        "missing project_name: {}",
+        content
+    );
+    assert!(content.contains("source: \"cc\""));
+    assert!(content.contains("status: \"completed\""));
+    assert!(content.contains("message_count: 10"));
+    assert!(content.contains("learnings_count: 2"));
+    assert!(content.contains("git_branch: \"main\""));
+    assert!(content.contains("last_exported:"));
+    // Tags include new families.
+    assert!(content.contains("cc-source/cc"));
+    assert!(content.contains("cc-status/completed"));
+    assert!(content.contains("cc-decisions/1"));
+    assert!(content.contains("cc-lessons/1"));
+    assert!(content.contains("cc-has-decisions"));
+    // Body intact.
     assert!(content.contains("## What was done"));
     assert!(content.contains("## Decision points"));
     assert!(content.contains("used tokio::spawn"));
     assert!(content.contains("## Lessons & gotchas"));
     assert!(content.contains("watch lock order"));
+}
+
+#[test]
+fn test_export_omits_empty_git_branch() {
+    let tmp = TempDir::new().unwrap();
+    let mut session = make_session(10);
+    session.git_branch = String::new();
+    export_to_obsidian(&session, "x", &[], tmp.path().to_str().unwrap()).unwrap();
+    let files: Vec<_> = std::fs::read_dir(tmp.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .collect();
+    let content = std::fs::read_to_string(files[0].path()).unwrap();
+    assert!(
+        !content.contains("git_branch:"),
+        "should omit empty branch: {}",
+        content
+    );
 }
 
 #[test]

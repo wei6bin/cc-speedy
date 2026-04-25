@@ -59,6 +59,71 @@ pub fn is_available() -> bool {
         .unwrap_or(false)
 }
 
+/// Build a JS expression suitable for `obsidian eval code=...` that returns
+/// `true` if today's daily note exists AND already contains `marker`, else
+/// `false`. Marker is escaped to remain inside the JS string literal.
+pub fn build_dedupe_eval_code(marker: &str) -> String {
+    // Escape backslash first, then double-quote, for embedding in JS string literal.
+    let escaped: String = marker
+        .chars()
+        .flat_map(|c| match c {
+            '\\' => vec!['\\', '\\'],
+            '"' => vec!['\\', '"'],
+            '\n' => vec!['\\', 'n'],
+            other => vec![other],
+        })
+        .collect();
+    format!(
+        r#"(()=>{{const t=window.moment().format('YYYY-MM-DD');const f=app.vault.getMarkdownFiles().find(x=>x.basename===t);return !!(f && (await app.vault.read(f)).includes("{}"))}})()"#,
+        escaped,
+    )
+}
+
+/// Append a single line of content to today's daily note in `vault`. If
+/// `dedupe_marker` is `Some(s)` and today's daily note already contains `s`,
+/// the call is a no-op (idempotent). The CLI auto-creates today's daily note
+/// if it doesn't yet exist.
+pub fn daily_append(vault: &str, content: &str, dedupe_marker: Option<&str>) -> Result<(), Error> {
+    if !is_available() {
+        return Err(Error::CliMissing);
+    }
+
+    if let Some(marker) = dedupe_marker {
+        let code = build_dedupe_eval_code(marker);
+        let probe = Command::new("obsidian")
+            .arg(format!("vault={}", vault))
+            .arg("eval")
+            .arg(format!("code={}", escape_arg_value(&code)))
+            .output()
+            .map_err(|_| Error::NotRunning)?;
+        if !probe.status.success() {
+            // Vault not open or eval failed — surface as NotRunning.
+            return Err(Error::NotRunning);
+        }
+        let stdout = String::from_utf8_lossy(&probe.stdout);
+        if stdout.contains("=> true") {
+            return Ok(()); // already there; nothing to do
+        }
+    }
+
+    let out = Command::new("obsidian")
+        .arg(format!("vault={}", vault))
+        .arg("daily:append")
+        .arg(format!("content={}", escape_arg_value(content)))
+        .output()
+        .map_err(|_| Error::CliMissing)?;
+
+    if out.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let line = stderr.lines().next().unwrap_or("(no stderr)").to_string();
+        Err(Error::CommandFailed {
+            stderr_first_line: line,
+        })
+    }
+}
+
 /// Probe whether the named vault is currently open in a running Obsidian
 /// instance. Returns false if the CLI is missing, the app isn't running,
 /// the vault isn't open, or the eval otherwise fails.

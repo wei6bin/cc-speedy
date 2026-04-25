@@ -1,3 +1,4 @@
+use cc_speedy::obsidian_cli::build_dedupe_eval_code;
 use cc_speedy::obsidian_cli::escape_arg_value;
 
 #[test]
@@ -31,5 +32,42 @@ fn test_escape_combined() {
     assert_eq!(
         escape_arg_value("she said \"hi\"\nbye"),
         r#"she said \"hi\"\nbye"#,
+    );
+}
+
+#[test]
+fn test_dedupe_eval_contains_marker() {
+    let js = build_dedupe_eval_code("[[2026-04-25-foo]]");
+    assert!(
+        js.contains("[[2026-04-25-foo]]"),
+        "marker must appear: {}",
+        js
+    );
+}
+
+#[test]
+fn test_dedupe_eval_escapes_quote_in_marker() {
+    // markers shouldn't normally contain quotes, but if they do they must
+    // not break out of the JS string literal
+    let js = build_dedupe_eval_code(r#"contains "a quote""#);
+    assert!(
+        !js.contains(r#""contains "a quote""#),
+        "raw quote must not appear unescaped: {}",
+        js
+    );
+    assert!(
+        js.contains(r#"contains \"a quote\""#),
+        "expected escaped quotes: {}",
+        js
+    );
+}
+
+#[test]
+fn test_dedupe_eval_uses_today_moment() {
+    let js = build_dedupe_eval_code("anything");
+    assert!(
+        js.contains("moment()"),
+        "should ask for today's daily note: {}",
+        js
     );
 }

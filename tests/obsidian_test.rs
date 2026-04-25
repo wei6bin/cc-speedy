@@ -183,6 +183,7 @@ fn test_parse_status_unrecognised_value() {
 }
 
 use cc_speedy::obsidian::build_frontmatter_tags;
+use cc_speedy::obsidian::{build_daily_line, note_stem_for_session};
 
 fn lp(cat: &str) -> LearningPoint {
     LearningPoint {
@@ -299,4 +300,54 @@ fn test_export_status_unknown_when_no_status_section() {
         "expected unknown: {}",
         content
     );
+}
+
+#[test]
+fn test_note_stem_includes_date_slug_id() {
+    let session = make_session(10);
+    let stem = note_stem_for_session(&session, "2026-04-25");
+    assert!(stem.starts_with("2026-04-25-"), "stem: {}", stem);
+    assert!(stem.contains("ai-cc-speedy"), "stem: {}", stem);
+    assert!(stem.ends_with("-abc12345"), "stem: {}", stem);
+}
+
+#[test]
+fn test_daily_line_completed_status() {
+    let session = make_session(10);
+    let line = build_daily_line(
+        &session,
+        "2026-04-25-ai-cc-speedy-abc12345",
+        "completed",
+        "Fix the F1 popup clipping",
+    );
+    assert!(line.starts_with("- [[2026-04-25-ai-cc-speedy-abc12345]]"));
+    assert!(line.contains("**cc-speedy**"));
+    assert!(line.contains("10 msgs"));
+    assert!(line.contains("✅"));
+    assert!(line.contains("Fix the F1 popup clipping"));
+    assert!(line.ends_with("#cc-session"));
+}
+
+#[test]
+fn test_daily_line_in_progress_emoji() {
+    let session = make_session(10);
+    let line = build_daily_line(&session, "stem", "in_progress", "wip");
+    assert!(line.contains("🔧"));
+}
+
+#[test]
+fn test_daily_line_unknown_emoji() {
+    let session = make_session(10);
+    let line = build_daily_line(&session, "stem", "unknown", "x");
+    assert!(line.contains("🚧"));
+}
+
+#[test]
+fn test_daily_line_truncates_title_to_80_chars_unicode_safe() {
+    let session = make_session(10);
+    let long: String = "あ".repeat(120); // 120 multi-byte chars
+    let line = build_daily_line(&session, "stem", "completed", &long);
+    // The title chunk inside the line should be at most 80 chars from the long string.
+    let count = line.matches("あ").count();
+    assert!(count <= 80, "expected ≤80 occurrences, got {}", count);
 }

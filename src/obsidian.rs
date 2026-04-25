@@ -87,6 +87,43 @@ pub fn build_frontmatter_tags(
     tags
 }
 
+/// Compute the filename stem (filename minus `.md`) for a session note. Uses
+/// the same project-slug + id-prefix scheme as `export_to_obsidian` so the
+/// daily-note wikilink resolves to the right file.
+pub fn note_stem_for_session(session: &UnifiedSession, date_str: &str) -> String {
+    let project_slug: String = crate::util::path_last_n(&session.project_path, 2)
+        .replace('/', "-")
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    let id_prefix: String = session
+        .session_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .take(8)
+        .collect();
+    format!("{}-{}-{}", date_str, project_slug, id_prefix)
+}
+
+/// Build the bullet line that gets appended to today's daily note.
+pub fn build_daily_line(
+    session: &UnifiedSession,
+    note_stem: &str,
+    status: &str,
+    factual_title: &str,
+) -> String {
+    let emoji = match status {
+        "completed" => "✅",
+        "in_progress" => "🔧",
+        _ => "🚧",
+    };
+    let title_truncated: String = factual_title.chars().take(80).collect();
+    format!(
+        "- [[{}]] **{}** · {} msgs · {} {} #cc-session",
+        note_stem, session.project_name, session.message_count, emoji, title_truncated,
+    )
+}
+
 /// Write a weekly digest markdown file to `<vault>/cc-speedy/digests/YYYY-Www.md`.
 /// Returns the relative path (from vault root) for display.
 pub fn export_digest(vault_path: &str, digest_text: &str) -> Result<String> {
@@ -126,20 +163,8 @@ pub fn export_to_obsidian(
         .format("%Y-%m-%dT%H:%M:%S%:z")
         .to_string();
 
-    let project_slug: String = crate::util::path_last_n(&session.project_path, 2)
-        .replace('/', "-")
-        .chars()
-        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
-        .collect();
-
-    let id_prefix: String = session
-        .session_id
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
-        .take(8)
-        .collect();
-
-    let filename = format!("{}-{}-{}.md", date_str, project_slug, id_prefix);
+    let stem = note_stem_for_session(session, &date_str);
+    let filename = format!("{}.md", stem);
     let file_path = std::path::Path::new(vault_path).join(&filename);
 
     let source_str = match session.source {

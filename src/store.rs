@@ -494,3 +494,9 @@ pub fn get_setting_bool(conn: &Connection, key: &str, default: bool) -> bool {
 pub fn set_setting_bool(conn: &Connection, key: &str, value: bool) -> Result<()> {
     set_setting(conn, key, if value { "1" } else { "0" })
 }
+
+/// Delete a setting row, returning to the unset (`None`) state.
+pub fn clear_setting(conn: &Connection, key: &str) -> Result<()> {
+    conn.execute("DELETE FROM settings WHERE key = ?1", params![key])?;
+    Ok(())
+}

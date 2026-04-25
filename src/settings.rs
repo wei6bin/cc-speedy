@@ -18,6 +18,24 @@ impl Default for AppSettings {
     }
 }
 
+impl AppSettings {
+    /// Vault name to use for CLI calls. Returns the configured value if non-empty,
+    /// otherwise the basename of `obsidian_kb_path`, otherwise `None`.
+    pub fn effective_vault_name(&self) -> Option<String> {
+        if let Some(n) = self.obsidian_vault_name.as_deref() {
+            if !n.is_empty() {
+                return Some(n.to_owned());
+            }
+        }
+        self.obsidian_kb_path.as_deref().and_then(|p| {
+            std::path::Path::new(p)
+                .file_name()
+                .and_then(|x| x.to_str())
+                .map(|x| x.to_owned())
+        })
+    }
+}
+
 /// Load all settings from DB into AppSettings.
 pub fn load(conn: &Connection) -> AppSettings {
     AppSettings {
@@ -38,35 +56,19 @@ pub fn save_obsidian_path(conn: &Connection, path: &str) -> Result<()> {
     Ok(())
 }
 
-/// Persist the Obsidian vault name (used as the `vault=<name>` argument to the CLI).
-/// Trims whitespace; empty string clears it.
+/// Persist the Obsidian vault name. Trims whitespace; empty string deletes
+/// the setting (so subsequent loads see `None` and `effective_vault_name`
+/// falls back to the path basename).
 pub fn save_obsidian_vault_name(conn: &Connection, name: &str) -> Result<()> {
     let name = name.trim();
     if name.is_empty() {
-        crate::store::set_setting(conn, "obsidian_vault_name", "")?;
+        crate::store::clear_setting(conn, "obsidian_vault_name")
     } else {
-        crate::store::set_setting(conn, "obsidian_vault_name", name)?;
+        crate::store::set_setting(conn, "obsidian_vault_name", name)
     }
-    Ok(())
 }
 
 /// Persist the "push to today's daily note" toggle.
 pub fn save_obsidian_daily_push(conn: &Connection, value: bool) -> Result<()> {
     crate::store::set_setting_bool(conn, "obsidian_daily_push", value)
-}
-
-/// Vault name to use for CLI calls. Returns the configured value if non-empty,
-/// otherwise the basename of `obsidian_kb_path`, otherwise `None`.
-pub fn effective_vault_name(s: &AppSettings) -> Option<String> {
-    if let Some(n) = s.obsidian_vault_name.as_deref() {
-        if !n.is_empty() {
-            return Some(n.to_string());
-        }
-    }
-    s.obsidian_kb_path.as_deref().and_then(|p| {
-        std::path::Path::new(p)
-            .file_name()
-            .and_then(|x| x.to_str())
-            .map(|x| x.to_string())
-    })
 }

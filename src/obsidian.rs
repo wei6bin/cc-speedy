@@ -2,6 +2,15 @@ use crate::store::LearningPoint;
 use crate::unified::UnifiedSession;
 use anyhow::Result;
 
+/// Escape a string for use inside a YAML double-quoted scalar. Backslash MUST
+/// be escaped first so the other expansions don't double-escape its output.
+fn yaml_dq_escape(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+}
+
 /// Parse the `## Status` line out of a factual summary body and normalise it.
 /// Returns one of `"completed"`, `"in_progress"`, or `"unknown"`.
 pub fn parse_status_from_factual(body: &str) -> &'static str {
@@ -114,7 +123,7 @@ pub fn export_to_obsidian(
 
     let date_str = chrono::Local::now().format("%Y-%m-%d").to_string();
     let last_exported = chrono::Local::now()
-        .format("%Y-%m-%dT%H:%M:%S%z")
+        .format("%Y-%m-%dT%H:%M:%S%:z")
         .to_string();
 
     let project_slug: String = crate::util::path_last_n(&session.project_path, 2)
@@ -147,15 +156,15 @@ pub fn export_to_obsidian(
     front.push_str(&format!("date: {}\n", date_str));
     front.push_str(&format!(
         "project: \"{}\"\n",
-        session.project_path.replace('"', "\\\"")
+        yaml_dq_escape(&session.project_path)
     ));
     front.push_str(&format!(
         "project_name: \"{}\"\n",
-        project_name.replace('"', "\\\"")
+        yaml_dq_escape(&project_name)
     ));
     front.push_str(&format!(
         "session_id: \"{}\"\n",
-        session.session_id.replace('"', "\\\"")
+        yaml_dq_escape(&session.session_id)
     ));
     front.push_str(&format!("source: \"{}\"\n", source_str));
     front.push_str(&format!("status: \"{}\"\n", status));
@@ -164,10 +173,10 @@ pub fn export_to_obsidian(
     if !session.git_branch.is_empty() {
         front.push_str(&format!(
             "git_branch: \"{}\"\n",
-            session.git_branch.replace('"', "\\\"")
+            yaml_dq_escape(&session.git_branch)
         ));
     }
-    front.push_str(&format!("last_exported: {}\n", last_exported));
+    front.push_str(&format!("last_exported: \"{}\"\n", last_exported));
     front.push_str("tags: [");
     for (i, t) in tags.iter().enumerate() {
         if i > 0 {

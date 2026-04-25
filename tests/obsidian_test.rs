@@ -241,3 +241,62 @@ fn test_tags_skip_zero_count_categories() {
     assert!(!tags.contains(&"cc-has-decisions".to_string()));
     assert!(!tags.contains(&"cc-has-tools".to_string()));
 }
+
+#[test]
+fn test_export_escapes_double_quote_in_project_path() {
+    let tmp = TempDir::new().unwrap();
+    let mut session = make_session(10);
+    session.project_path = r#"/home/user/my"project"#.to_string();
+    export_to_obsidian(&session, "x", &[], tmp.path().to_str().unwrap()).unwrap();
+    let files: Vec<_> = std::fs::read_dir(tmp.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .collect();
+    let content = std::fs::read_to_string(files[0].path()).unwrap();
+    assert!(
+        content.contains(r#"project: "/home/user/my\"project""#),
+        "double-quote not escaped: {}",
+        content
+    );
+}
+
+#[test]
+fn test_export_escapes_backslash_in_project_path() {
+    let tmp = TempDir::new().unwrap();
+    let mut session = make_session(10);
+    session.project_path = r"C:\Users\dev\project".to_string();
+    export_to_obsidian(&session, "x", &[], tmp.path().to_str().unwrap()).unwrap();
+    let files: Vec<_> = std::fs::read_dir(tmp.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .collect();
+    let content = std::fs::read_to_string(files[0].path()).unwrap();
+    assert!(
+        content.contains(r#"project: "C:\\Users\\dev\\project""#),
+        "backslash not doubled: {}",
+        content
+    );
+}
+
+#[test]
+fn test_export_status_unknown_when_no_status_section() {
+    let tmp = TempDir::new().unwrap();
+    let session = make_session(10);
+    export_to_obsidian(
+        &session,
+        "## What was done\n- stuff\n",
+        &[],
+        tmp.path().to_str().unwrap(),
+    )
+    .unwrap();
+    let files: Vec<_> = std::fs::read_dir(tmp.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .collect();
+    let content = std::fs::read_to_string(files[0].path()).unwrap();
+    assert!(
+        content.contains("status: \"unknown\""),
+        "expected unknown: {}",
+        content
+    );
+}

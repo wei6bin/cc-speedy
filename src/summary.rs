@@ -1,18 +1,22 @@
-use anyhow::Result;
-use std::path::{Path, PathBuf};
-use dirs::home_dir;
 use crate::sessions::Message;
+use anyhow::Result;
+use dirs::home_dir;
+use std::path::{Path, PathBuf};
 
 // Uses `claude -p` (Claude Code CLI) so no separate API key is needed —
 // authentication comes from your existing Claude subscription.
 
 pub fn summaries_dir() -> PathBuf {
-    home_dir().expect("HOME directory must be set").join(".claude").join("summaries")
+    home_dir()
+        .expect("HOME directory must be set")
+        .join(".claude")
+        .join("summaries")
 }
 
 pub fn summary_path(session_id: &str) -> PathBuf {
     // Sanitize: keep only chars valid in a UUID/session-id to prevent path traversal
-    let safe: String = session_id.chars()
+    let safe: String = session_id
+        .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
         .collect();
     summaries_dir().join(format!("{}.md", safe))
@@ -42,21 +46,32 @@ fn strip_attachment_refs(text: &str) -> String {
             let mut inner = String::new();
             let mut closed = false;
             for ch in chars.by_ref() {
-                if ch == ']' { closed = true; break; }
+                if ch == ']' {
+                    closed = true;
+                    break;
+                }
                 inner.push(ch);
             }
             // Heuristic: attachment refs contain an emoji and a filename (has a '.')
             let looks_like_attachment = closed
-                && inner.chars().next().map(|c| !c.is_alphanumeric()).unwrap_or(false)
+                && inner
+                    .chars()
+                    .next()
+                    .map(|c| !c.is_alphanumeric())
+                    .unwrap_or(false)
                 && inner.contains('.');
             if !looks_like_attachment {
                 result.push('[');
                 result.push_str(&inner);
-                if closed { result.push(']'); }
+                if closed {
+                    result.push(']');
+                }
             }
             // Either way, skip the leading space after the `]` if present
             if closed && looks_like_attachment {
-                if chars.peek() == Some(&' ') { chars.next(); }
+                if chars.peek() == Some(&' ') {
+                    chars.next();
+                }
             }
         } else {
             result.push(c);
@@ -72,9 +87,16 @@ pub async fn generate_summary(
     // Take last 50 messages. Strip [📷 file] attachment refs first — when included
     // verbatim in a `claude --print` prompt they cause the CLI to attempt file reads,
     // which hangs indefinitely in non-interactive mode (e.g. Copilot sessions).
-    let snippet: String = messages.iter().rev().take(50).rev()
+    let snippet: String = messages
+        .iter()
+        .rev()
+        .take(50)
+        .rev()
         .map(|m| {
-            let text = strip_attachment_refs(&m.text).chars().take(200).collect::<String>();
+            let text = strip_attachment_refs(&m.text)
+                .chars()
+                .take(200)
+                .collect::<String>();
             format!("{}: {}", m.role, text)
         })
         .collect::<Vec<_>>()
@@ -84,7 +106,8 @@ pub async fn generate_summary(
     let existing_text = if existing_learnings.is_empty() {
         "(none)".to_string()
     } else {
-        existing_learnings.iter()
+        existing_learnings
+            .iter()
             .map(|l| format!("[{}] {}", l.category, l.point))
             .collect::<Vec<_>>()
             .join("\n")
@@ -206,7 +229,9 @@ pub async fn run_hook() -> Result<()> {
 pub fn find_jsonl(session_id: &str) -> Option<String> {
     let base = home_dir()?.join(".claude").join("projects");
     for proj in std::fs::read_dir(&base).ok()? {
-        let Ok(proj) = proj else { continue; };
+        let Ok(proj) = proj else {
+            continue;
+        };
         let candidate = proj.path().join(format!("{}.jsonl", session_id));
         if candidate.exists() {
             return Some(candidate.to_string_lossy().to_string());
@@ -225,18 +250,34 @@ pub fn parse_learning_output(learning_md: &str) -> Vec<crate::store::LearningPoi
     for line in learning_md.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with("## ") {
-            let heading = trimmed.trim_start_matches("## ").trim_end_matches(':').to_lowercase();
+            let heading = trimmed
+                .trim_start_matches("## ")
+                .trim_end_matches(':')
+                .to_lowercase();
             current_category = match heading.as_str() {
                 "decision points" | "decision_points" => Some("decision_points"),
-                "lessons & gotchas" | "lessons_&_gotchas" | "lessons and gotchas" => Some("lessons_gotchas"),
-                "tools & commands discovered" | "tools_&_commands_discovered" | "tools and commands discovered" => Some("tools_commands"),
+                "lessons & gotchas" | "lessons_&_gotchas" | "lessons and gotchas" => {
+                    Some("lessons_gotchas")
+                }
+                "tools & commands discovered"
+                | "tools_&_commands_discovered"
+                | "tools and commands discovered" => Some("tools_commands"),
                 _ => None,
             };
         } else if trimmed.starts_with("- ") {
             if let Some(cat) = current_category {
                 let point = trimmed.trim_start_matches("- ").trim().to_string();
-                if !point.is_empty() && !point.to_lowercase().trim_matches(|c| c == '(' || c == ')').trim().eq("none") {
-                    points.push(crate::store::LearningPoint { category: cat.to_string(), point });
+                if !point.is_empty()
+                    && !point
+                        .to_lowercase()
+                        .trim_matches(|c| c == '(' || c == ')')
+                        .trim()
+                        .eq("none")
+                {
+                    points.push(crate::store::LearningPoint {
+                        category: cat.to_string(),
+                        point,
+                    });
                 }
             }
         }
@@ -255,13 +296,14 @@ pub fn build_combined_display(factual: &str, learnings: &[crate::store::Learning
     out.push_str("\n\n── Knowledge Capture ──────────────────────");
 
     let categories = [
-        ("decision_points",  "## Decision points"),
-        ("lessons_gotchas",  "## Lessons & gotchas"),
-        ("tools_commands",   "## Tools & commands discovered"),
+        ("decision_points", "## Decision points"),
+        ("lessons_gotchas", "## Lessons & gotchas"),
+        ("tools_commands", "## Tools & commands discovered"),
     ];
 
     for (cat, heading) in &categories {
-        let items: Vec<&str> = learnings.iter()
+        let items: Vec<&str> = learnings
+            .iter()
             .filter(|l| l.category == *cat)
             .map(|l| l.point.as_str())
             .collect();

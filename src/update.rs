@@ -72,8 +72,8 @@ pub async fn run() -> Result<()> {
         bytes.to_vec()
     };
 
-    let current_exe = std::env::current_exe()
-        .context("cannot determine current executable path")?;
+    let current_exe =
+        std::env::current_exe().context("cannot determine current executable path")?;
     let tmp_path = current_exe.with_extension("tmp");
     fs::write(&tmp_path, &binary_bytes).context("failed to write temp binary")?;
     fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o755))
@@ -84,37 +84,48 @@ pub async fn run() -> Result<()> {
     Ok(())
 }
 
-fn find_asset<'a>(assets: &'a [serde_json::Value], platform: &str) -> Option<&'a serde_json::Value> {
+fn find_asset<'a>(
+    assets: &'a [serde_json::Value],
+    platform: &str,
+) -> Option<&'a serde_json::Value> {
     // Prefer exact platform substring match (e.g. "x86_64-unknown-linux-musl")
-    assets.iter().find(|a| {
-        a["name"].as_str().map(|n| n.contains(platform)).unwrap_or(false)
-    })
-    // Fallback: match on arch + os keywords separately
-    .or_else(|| {
-        let arch = std::env::consts::ARCH;
-        let os_key = os_keyword();
-        assets.iter().find(|a| {
-            a["name"].as_str().map(|n| n.contains(arch) && n.contains(os_key)).unwrap_or(false)
+    assets
+        .iter()
+        .find(|a| {
+            a["name"]
+                .as_str()
+                .map(|n| n.contains(platform))
+                .unwrap_or(false)
         })
-    })
+        // Fallback: match on arch + os keywords separately
+        .or_else(|| {
+            let arch = std::env::consts::ARCH;
+            let os_key = os_keyword();
+            assets.iter().find(|a| {
+                a["name"]
+                    .as_str()
+                    .map(|n| n.contains(arch) && n.contains(os_key))
+                    .unwrap_or(false)
+            })
+        })
 }
 
 // Returns the full Rust target triple for this host, covering common release targets.
 fn platform_target() -> String {
     let arch = std::env::consts::ARCH;
     match std::env::consts::OS {
-        "linux"  => format!("{arch}-unknown-linux-musl"),
-        "macos"  => format!("{arch}-apple-darwin"),
+        "linux" => format!("{arch}-unknown-linux-musl"),
+        "macos" => format!("{arch}-apple-darwin"),
         "windows" => format!("{arch}-pc-windows-msvc"),
-        other    => format!("{arch}-{other}"),
+        other => format!("{arch}-{other}"),
     }
 }
 
 fn os_keyword() -> &'static str {
     match std::env::consts::OS {
-        "macos"   => "darwin",
+        "macos" => "darwin",
         "windows" => "windows",
-        _         => "linux",
+        _ => "linux",
     }
 }
 
@@ -122,16 +133,19 @@ fn os_keyword() -> &'static str {
 fn extract_from_tarball(data: &[u8]) -> Result<Vec<u8>> {
     let gz = GzDecoder::new(data);
     let mut archive = tar::Archive::new(gz);
-    for entry in archive.entries().context("failed to read tarball entries")? {
+    for entry in archive
+        .entries()
+        .context("failed to read tarball entries")?
+    {
         let mut entry = entry.context("bad tarball entry")?;
         let path = entry.path().context("bad entry path")?;
-        let name = path.file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("");
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
         // Pick the first entry that looks like our binary (no extension, or named cc-speedy)
         if !name.contains('.') || name == "cc-speedy" {
             let mut buf = Vec::new();
-            entry.read_to_end(&mut buf).context("failed to read binary from tarball")?;
+            entry
+                .read_to_end(&mut buf)
+                .context("failed to read binary from tarball")?;
             return Ok(buf);
         }
     }

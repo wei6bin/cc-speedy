@@ -65,18 +65,24 @@ pub fn build_digest(
     // Group by project_path.
     let mut by_path: HashMap<String, ProjectDigest> = HashMap::new();
     for s in &in_window {
-        let row = by_path.entry(s.project_path.clone()).or_insert_with(|| ProjectDigest {
-            project_path: s.project_path.clone(),
-            name: crate::util::path_last_n(&s.project_path, 2),
-            session_count: 0,
-            last_active: std::time::UNIX_EPOCH,
-            session_titles: Vec::new(),
-        });
+        let row = by_path
+            .entry(s.project_path.clone())
+            .or_insert_with(|| ProjectDigest {
+                project_path: s.project_path.clone(),
+                name: crate::util::path_last_n(&s.project_path, 2),
+                session_count: 0,
+                last_active: std::time::UNIX_EPOCH,
+                session_titles: Vec::new(),
+            });
         row.session_count += 1;
         if s.modified > row.last_active {
             row.last_active = s.modified;
         }
-        let title = if !s.summary.is_empty() { s.summary.clone() } else { s.project_name.clone() };
+        let title = if !s.summary.is_empty() {
+            s.summary.clone()
+        } else {
+            s.project_name.clone()
+        };
         row.session_titles.push(title);
     }
 
@@ -139,7 +145,9 @@ pub fn render_digest(d: &DigestData) -> String {
     ));
     out.push_str(&format!(
         "  Sessions:   {}       Projects: {}       Learnings: {}\n",
-        d.session_count, d.projects.len(), d.learning_count,
+        d.session_count,
+        d.projects.len(),
+        d.learning_count,
     ));
 
     if d.session_count == 0 && d.learning_count == 0 {
@@ -168,13 +176,17 @@ pub fn render_digest(d: &DigestData) -> String {
             let tag = match l.category.as_str() {
                 "decision_points" => "DEC",
                 "lessons_gotchas" => "LSN",
-                "tools_commands"  => "TOL",
+                "tools_commands" => "TOL",
                 _ => "???",
             };
-            let ts = std::time::UNIX_EPOCH + std::time::Duration::from_secs(l.captured_at.max(0) as u64);
+            let ts =
+                std::time::UNIX_EPOCH + std::time::Duration::from_secs(l.captured_at.max(0) as u64);
             out.push_str(&format!(
                 "  [{}] {} — {} · {}\n",
-                tag, l.point, l.project_name, fmt_date(ts),
+                tag,
+                l.point,
+                l.project_name,
+                fmt_date(ts),
             ));
         }
     }
@@ -183,7 +195,10 @@ pub fn render_digest(d: &DigestData) -> String {
 }
 
 fn fmt_date(t: SystemTime) -> String {
-    let secs = t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let secs = t
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     let dt = chrono::DateTime::<chrono::Local>::from(
         std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs),
     );

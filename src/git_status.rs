@@ -5,8 +5,12 @@ use std::time::Duration;
 /// Branch string is populated for Clean/Dirty; omitted for NoGit/Error.
 #[derive(Clone, Debug, PartialEq)]
 pub enum GitStatus {
-    Clean { branch: String },
-    Dirty { branch: String },
+    Clean {
+        branch: String,
+    },
+    Dirty {
+        branch: String,
+    },
     NoGit,
     /// Timeout, git binary missing, or any other failure.
     Error,

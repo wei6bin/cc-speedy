@@ -25,6 +25,13 @@ enum Focus {
     Preview,
 }
 
+#[derive(PartialEq, Copy, Clone)]
+enum SettingsField {
+    Path,
+    VaultName,
+    DailyPush,
+}
+
 #[derive(PartialEq)]
 enum AppMode {
     Normal,
@@ -118,6 +125,7 @@ struct AppState {
     settings: crate::settings::AppSettings,
     // Settings panel state (used by AppMode::Settings, added in Task 6)
     settings_editing: bool,
+    settings_field: SettingsField,
     settings_input: String,
     settings_error: Option<String>,
 }
@@ -192,6 +200,7 @@ impl AppState {
             digest_scroll: 0,
             settings,
             settings_editing: false,
+            settings_field: SettingsField::Path,
             settings_input: String::new(),
             settings_error: None,
         };
@@ -1495,11 +1504,30 @@ async fn run_event_loop(
 
                     // --- Settings panel ---
                     (AppMode::Normal, KeyModifiers::NONE, KeyCode::Char('s')) => {
+                        app.settings_field = SettingsField::Path;
                         app.settings_input =
                             app.settings.obsidian_kb_path.clone().unwrap_or_default();
                         app.settings_error = None;
                         app.settings_editing = false;
                         app.mode = AppMode::Settings;
+                    }
+                    (AppMode::Settings, _, KeyCode::Tab) if !app.settings_editing => {
+                        app.settings_field = match app.settings_field {
+                            SettingsField::Path => SettingsField::VaultName,
+                            SettingsField::VaultName => SettingsField::DailyPush,
+                            SettingsField::DailyPush => SettingsField::Path,
+                        };
+                        // Reseed input from the new focused field's stored value.
+                        app.settings_input = match app.settings_field {
+                            SettingsField::Path => {
+                                app.settings.obsidian_kb_path.clone().unwrap_or_default()
+                            }
+                            SettingsField::VaultName => {
+                                app.settings.obsidian_vault_name.clone().unwrap_or_default()
+                            }
+                            SettingsField::DailyPush => String::new(), // boolean — no text input
+                        };
+                        app.settings_error = None;
                     }
                     (AppMode::Settings, _, KeyCode::Esc) => {
                         if app.settings_editing {
@@ -1510,27 +1538,61 @@ async fn run_event_loop(
                         }
                     }
                     (AppMode::Settings, _, KeyCode::Enter) => {
-                        if !app.settings_editing {
-                            app.settings_editing = true;
-                            app.settings_error = None;
-                        } else {
-                            let path = app.settings_input.trim().to_string();
-                            let result = crate::settings::save_obsidian_path(
+                        if !app.settings_editing && app.settings_field == SettingsField::DailyPush {
+                            // Boolean — Enter toggles directly, no edit mode.
+                            let new_val = !app.settings.obsidian_daily_push;
+                            let result = crate::settings::save_obsidian_daily_push(
                                 &app.db.lock().unwrap_or_else(|e| e.into_inner()),
-                                &path,
+                                new_val,
                             );
                             match result {
                                 Ok(()) => {
-                                    app.settings.obsidian_kb_path = Some(path);
+                                    app.settings.obsidian_daily_push = new_val;
+                                    app.status_msg = Some((
+                                        format!(
+                                            "Daily push: {}",
+                                            if new_val { "on" } else { "off" }
+                                        ),
+                                        Instant::now(),
+                                    ));
+                                }
+                                Err(e) => app.settings_error = Some(e.to_string()),
+                            }
+                        } else if !app.settings_editing {
+                            app.settings_editing = true;
+                            app.settings_error = None;
+                        } else {
+                            // Save the focused text field.
+                            let value = app.settings_input.trim().to_string();
+                            let conn = app.db.lock().unwrap_or_else(|e| e.into_inner());
+                            let result = match app.settings_field {
+                                SettingsField::Path => {
+                                    crate::settings::save_obsidian_path(&conn, &value)
+                                }
+                                SettingsField::VaultName => {
+                                    crate::settings::save_obsidian_vault_name(&conn, &value)
+                                }
+                                SettingsField::DailyPush => unreachable!(),
+                            };
+                            drop(conn);
+                            match result {
+                                Ok(()) => {
+                                    match app.settings_field {
+                                        SettingsField::Path => {
+                                            app.settings.obsidian_kb_path =
+                                                if value.is_empty() { None } else { Some(value) }
+                                        }
+                                        SettingsField::VaultName => {
+                                            app.settings.obsidian_vault_name =
+                                                if value.is_empty() { None } else { Some(value) }
+                                        }
+                                        SettingsField::DailyPush => unreachable!(),
+                                    }
                                     app.settings_editing = false;
                                     app.settings_error = None;
-                                    app.status_msg =
-                                        Some(("Obsidian path saved".to_string(), Instant::now()));
-                                    app.mode = AppMode::Normal;
+                                    app.status_msg = Some(("Saved".to_string(), Instant::now()));
                                 }
-                                Err(e) => {
-                                    app.settings_error = Some(e.to_string());
-                                }
+                                Err(e) => app.settings_error = Some(e.to_string()),
                             }
                         }
                     }
@@ -2669,38 +2731,79 @@ fn draw_help_popup(f: &mut ratatui::Frame, area: Rect) {
 }
 
 fn draw_settings_popup(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
-    let popup_area = centered_rect(70, 10, area);
+    let popup_area = centered_rect(70, 16, area);
     f.render_widget(Clear, popup_area);
 
-    let obsidian_display = if app.settings_editing {
-        format!("▶ {}|", app.settings_input)
+    let path_val = app
+        .settings
+        .obsidian_kb_path
+        .as_deref()
+        .unwrap_or("(not set)");
+    let vault_val = app
+        .settings
+        .obsidian_vault_name
+        .as_deref()
+        .unwrap_or("(auto-derived from path)");
+    let push_val = if app.settings.obsidian_daily_push {
+        "on"
     } else {
-        let val = app
-            .settings
-            .obsidian_kb_path
-            .as_deref()
-            .unwrap_or("(not set)");
-        format!("  {}", val)
+        "off"
     };
 
-    let error_line = if let Some(ref err) = app.settings_error {
-        format!("\n  ✗ {}", err)
-    } else {
-        String::new()
+    let row = |focused: bool, label: &str, value: &str| -> Line<'_> {
+        let marker = if focused { "▶ " } else { "  " };
+        Line::from(vec![
+            Span::raw(format!("{}{:<22}", marker, label)),
+            Span::styled(value.to_string(), Style::default().fg(theme::FG)),
+        ])
     };
 
-    let hint = if app.settings_editing {
-        "[Enter] Save   [Esc] Cancel"
+    let path_line = if app.settings_editing && app.settings_field == SettingsField::Path {
+        row(true, "Vault path:", &format!("{}|", app.settings_input))
     } else {
-        "[Enter] Edit   [Esc] Close"
+        row(
+            app.settings_field == SettingsField::Path,
+            "Vault path:",
+            path_val,
+        )
     };
-
-    let content = format!(
-        "\n  Obsidian KB path\n  {}{}\n\n  {}",
-        obsidian_display, error_line, hint
+    let name_line = if app.settings_editing && app.settings_field == SettingsField::VaultName {
+        row(true, "Vault name:", &format!("{}|", app.settings_input))
+    } else {
+        row(
+            app.settings_field == SettingsField::VaultName,
+            "Vault name:",
+            vault_val,
+        )
+    };
+    let push_line = row(
+        app.settings_field == SettingsField::DailyPush,
+        "Push to daily note:",
+        push_val,
     );
 
-    let popup = Paragraph::new(content)
+    let mut lines = vec![
+        Line::from(""),
+        path_line,
+        name_line,
+        push_line,
+        Line::from(""),
+    ];
+    if let Some(ref err) = app.settings_error {
+        lines.push(Line::from(Span::styled(
+            format!("  ✗ {}", err),
+            Style::default().fg(ratatui::style::Color::Red),
+        )));
+        lines.push(Line::from(""));
+    }
+    let hint = if app.settings_editing {
+        "  [Enter] Save   [Esc] Cancel"
+    } else {
+        "  [Tab] Next field   [Enter] Edit / Toggle   [Esc] Close"
+    };
+    lines.push(Line::from(hint));
+
+    let popup = Paragraph::new(lines)
         .block(
             Block::default()
                 .border_type(theme::BORDER_TYPE)

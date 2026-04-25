@@ -1,6 +1,30 @@
-use anyhow::Result;
-use crate::unified::UnifiedSession;
 use crate::store::LearningPoint;
+use crate::unified::UnifiedSession;
+use anyhow::Result;
+
+/// Parse the `## Status` line out of a factual summary body and normalise it.
+/// Returns one of `"completed"`, `"in_progress"`, or `"unknown"`.
+pub fn parse_status_from_factual(body: &str) -> &'static str {
+    let mut lines = body.lines();
+    while let Some(l) = lines.next() {
+        if l.trim().eq_ignore_ascii_case("## Status") {
+            // Read forward until the first non-empty line.
+            for next in lines.by_ref() {
+                let t = next.trim();
+                if t.is_empty() {
+                    continue;
+                }
+                let lc = t.to_ascii_lowercase();
+                return match lc.as_str() {
+                    "completed" => "completed",
+                    "in progress" => "in_progress",
+                    _ => "unknown",
+                };
+            }
+        }
+    }
+    "unknown"
+}
 
 /// Write a weekly digest markdown file to `<vault>/cc-speedy/digests/YYYY-Www.md`.
 /// Returns the relative path (from vault root) for display.
@@ -46,7 +70,8 @@ pub fn export_to_obsidian(
         .collect();
 
     // First 8 alphanumeric-or-dash chars of session_id
-    let id_prefix: String = session.session_id
+    let id_prefix: String = session
+        .session_id
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
         .take(8)
@@ -67,12 +92,13 @@ pub fn export_to_obsidian(
     if !learnings.is_empty() {
         content.push_str("\n\n---\n");
         let categories = [
-            ("decision_points",  "## Decision points"),
-            ("lessons_gotchas",  "## Lessons & gotchas"),
-            ("tools_commands",   "## Tools & commands discovered"),
+            ("decision_points", "## Decision points"),
+            ("lessons_gotchas", "## Lessons & gotchas"),
+            ("tools_commands", "## Tools & commands discovered"),
         ];
         for (cat, heading) in &categories {
-            let items: Vec<&str> = learnings.iter()
+            let items: Vec<&str> = learnings
+                .iter()
                 .filter(|l| l.category == *cat)
                 .map(|l| l.point.as_str())
                 .collect();

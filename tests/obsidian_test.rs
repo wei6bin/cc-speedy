@@ -1,4 +1,5 @@
 use cc_speedy::obsidian::export_to_obsidian;
+use cc_speedy::obsidian::parse_status_from_factual;
 use cc_speedy::store::LearningPoint;
 use cc_speedy::unified::{SessionSource, UnifiedSession};
 use std::time::{Duration, UNIX_EPOCH};
@@ -112,4 +113,34 @@ fn test_export_overwrites_existing_file() {
     let content = std::fs::read_to_string(files[0].path()).unwrap();
     assert!(content.contains("new content"));
     assert!(!content.contains("old content"));
+}
+
+#[test]
+fn test_parse_status_completed() {
+    let body = "## What was done\n- x\n\n## Status\nCompleted\n\n## Approach\n";
+    assert_eq!(parse_status_from_factual(body), "completed");
+}
+
+#[test]
+fn test_parse_status_in_progress_two_words() {
+    let body = "## Status\nIn progress\n";
+    assert_eq!(parse_status_from_factual(body), "in_progress");
+}
+
+#[test]
+fn test_parse_status_missing_returns_unknown() {
+    let body = "## What was done\n- only this\n";
+    assert_eq!(parse_status_from_factual(body), "unknown");
+}
+
+#[test]
+fn test_parse_status_extra_whitespace() {
+    let body = "## Status\n  Completed   \n";
+    assert_eq!(parse_status_from_factual(body), "completed");
+}
+
+#[test]
+fn test_parse_status_unrecognised_value() {
+    let body = "## Status\nBlocked on infra\n";
+    assert_eq!(parse_status_from_factual(body), "unknown");
 }

@@ -66,6 +66,13 @@ pub fn open_db() -> Result<Connection> {
          CREATE TABLE IF NOT EXISTS obsidian_synced (
              session_id  TEXT PRIMARY KEY,
              synced_at   INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+         );
+         CREATE TABLE IF NOT EXISTS insights (
+             session_id   TEXT PRIMARY KEY,
+             source       TEXT NOT NULL,
+             source_mtime INTEGER NOT NULL,
+             blob         TEXT NOT NULL,
+             generated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
          );",
     )?;
     Ok(conn)
@@ -477,6 +484,66 @@ pub fn set_setting(conn: &Connection, key: &str, value: &str) -> Result<()> {
         "INSERT INTO settings (key, value) VALUES (?1, ?2)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         params![key, value],
+    )?;
+    Ok(())
+}
+
+/// One cached insights row: the parsed [`SessionInsights`] plus the source file
+/// mtime that generated it. Callers compare `source_mtime` against the live
+/// JSONL mtime to decide whether to recompute.
+#[derive(Debug, Clone)]
+pub struct CachedInsights {
+    pub source_mtime: i64,
+    pub insights: crate::insights::SessionInsights,
+}
+
+/// Load all cached insights, keyed by session_id. Rows whose JSON fails to
+/// deserialize (e.g. after a struct change) are silently dropped — they'll be
+/// recomputed on next access.
+pub fn load_all_insights(conn: &Connection) -> Result<HashMap<String, CachedInsights>> {
+    let mut stmt = conn.prepare("SELECT session_id, source_mtime, blob FROM insights")?;
+    let mut out: HashMap<String, CachedInsights> = HashMap::new();
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?
+        .filter_map(|r| r.ok());
+    for (sid, mtime, blob) in rows {
+        if let Ok(insights) = serde_json::from_str(&blob) {
+            out.insert(
+                sid,
+                CachedInsights {
+                    source_mtime: mtime,
+                    insights,
+                },
+            );
+        }
+    }
+    Ok(out)
+}
+
+/// Insert or replace a cached insights row.
+pub fn save_insights(
+    conn: &Connection,
+    session_id: &str,
+    source: &str,
+    source_mtime: i64,
+    insights: &crate::insights::SessionInsights,
+) -> Result<()> {
+    let blob = serde_json::to_string(insights)?;
+    conn.execute(
+        "INSERT INTO insights (session_id, source, source_mtime, blob)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(session_id) DO UPDATE SET
+             source       = excluded.source,
+             source_mtime = excluded.source_mtime,
+             blob         = excluded.blob,
+             generated_at = strftime('%s','now')",
+        params![session_id, source, source_mtime, blob],
     )?;
     Ok(())
 }

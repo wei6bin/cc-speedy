@@ -1,6 +1,7 @@
 pub mod copilot_sessions;
 pub mod digest;
 pub mod git_status;
+pub mod insights;
 pub mod install;
 pub mod obsidian;
 pub mod obsidian_cli;
@@ -12,6 +13,7 @@ pub mod summary;
 pub mod theme;
 pub mod tmux;
 pub mod tui;
+pub mod turn_detail;
 pub mod unified;
 pub mod update;
 pub mod util;

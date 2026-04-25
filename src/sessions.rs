@@ -224,19 +224,24 @@ pub fn list_sessions() -> Result<Vec<Session>> {
     let mut sessions = Vec::new();
     let renames = read_rename_history();
 
-    'proj: for proj_entry in std::fs::read_dir(&claude_dir)? {
+    for proj_entry in std::fs::read_dir(&claude_dir)? {
         let proj_entry = proj_entry?;
         let proj_path = proj_entry.path();
         if !proj_path.is_dir() {
             continue;
         }
 
-        // Index path: try sessions-index.json first
+        // Consume sessions-index.json if present, but track which session IDs it
+        // covered so we still pick up newer JSONLs that the (potentially stale)
+        // index doesn't know about.
+        let mut indexed_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
         if let Some(index) = read_sessions_index(&proj_path) {
             let project_path = index.original_path.clone();
             let project_name = path_to_display_name(&project_path);
 
             for entry in &index.entries {
+                indexed_ids.insert(entry.session_id.clone());
+
                 if entry.is_sidechain {
                     continue;
                 }
@@ -266,10 +271,10 @@ pub fn list_sessions() -> Result<Vec<Session>> {
                     git_branch: entry.git_branch.clone(),
                 });
             }
-            continue 'proj;
         }
 
-        // Fallback path: existing jsonl parsing logic
+        // Fallback / supplement: scan the directory and parse any JSONL whose
+        // session_id wasn't already covered by the index above.
         let Ok(dir_iter) = std::fs::read_dir(&proj_path) else {
             continue;
         };
@@ -279,6 +284,11 @@ pub fn list_sessions() -> Result<Vec<Session>> {
             };
             let file_path = file_entry.path();
             if file_path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+
+            let session_id_for_dedup = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            if indexed_ids.contains(session_id_for_dedup) {
                 continue;
             }
 

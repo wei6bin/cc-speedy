@@ -49,6 +49,8 @@ enum AppMode {
     LinkPickerFilter,
     Digest,
     Help,
+    /// Full-screen modal showing one assistant turn's content (Phase 3).
+    TurnDetail,
 }
 
 #[derive(PartialEq, Copy, Clone)]
@@ -128,6 +130,34 @@ struct AppState {
     settings_field: SettingsField,
     settings_input: String,
     settings_error: Option<String>,
+    /// Per-session insights cache: session_id → (source_mtime, insights).
+    /// Loaded lazily; entries refresh when source mtime advances.
+    insights_cache: Arc<Mutex<std::collections::HashMap<String, crate::store::CachedInsights>>>,
+    /// Session IDs currently being parsed in a background task — guards
+    /// against duplicate spawns.
+    insights_loading: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// Whether the Insights panel is shown above the Summary panel. Toggled with `i`.
+    insights_visible: bool,
+    /// Cursor position into the focused session's glyph timeline. `None` when
+    /// inactive — the renderer then highlights nothing and the label line shows
+    /// the last turn. Reset to `None` whenever the selected session changes.
+    glyph_cursor: Option<usize>,
+    /// session_id of the last session whose insights were rendered. Used to
+    /// detect selection changes so `glyph_cursor` can auto-reset without
+    /// touching every navigation handler.
+    last_insights_session_id: Option<String>,
+    /// Currently displayed turn detail in `AppMode::TurnDetail`. Re-extracted
+    /// when the user presses `[` / `]` inside the modal.
+    turn_detail: Option<crate::turn_detail::TurnDetail>,
+    /// Vertical scroll position (in rendered lines) within the turn-detail modal.
+    turn_detail_scroll: u16,
+    /// Block indices currently expanded. Re-populated each time a turn is loaded
+    /// based on default expansion rules (Text expanded, short Tool results
+    /// expanded, Thinking collapsed).
+    turn_detail_expanded: std::collections::HashSet<usize>,
+    /// Index of the focused block in `turn_detail.blocks`. 0 by default; reset
+    /// on every turn navigation.
+    turn_detail_focused: usize,
 }
 
 impl AppState {
@@ -154,6 +184,7 @@ impl AppState {
         let obsidian_synced = crate::store::load_obsidian_synced(&conn).unwrap_or_default();
         let tags_by_session = crate::store::load_all_tags(&conn).unwrap_or_default();
         let parent_of = crate::store::load_all_links(&conn).unwrap_or_default();
+        let insights_cache = crate::store::load_all_insights(&conn).unwrap_or_default();
         let settings = crate::settings::load(&conn);
         let mut state = Self {
             filtered_active: (0..n).collect(),
@@ -203,6 +234,15 @@ impl AppState {
             settings_field: SettingsField::Path,
             settings_input: String::new(),
             settings_error: None,
+            insights_cache: Arc::new(Mutex::new(insights_cache)),
+            insights_loading: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            insights_visible: true,
+            glyph_cursor: None,
+            last_insights_session_id: None,
+            turn_detail: None,
+            turn_detail_scroll: 0,
+            turn_detail_expanded: std::collections::HashSet::new(),
+            turn_detail_focused: 0,
         };
         // Split archived out of the active list on startup so the "all" view
         // correctly shows archived sessions in the bottom-left panel.
@@ -590,6 +630,171 @@ fn spawn_git_status_check(
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(path, (status, Instant::now()));
+    });
+}
+
+/// Synchronously extract the focused turn from the selected CC session's JSONL
+/// and switch to `AppMode::TurnDetail`. Sub-100ms even on 600-turn sessions
+/// (single sequential scan), so blocking the UI thread is acceptable.
+fn open_turn_detail(app: &mut AppState) {
+    let Some(turn_idx) = app.glyph_cursor else {
+        return;
+    };
+    let Some(s) = app.selected_session() else {
+        return;
+    };
+    let Some(jsonl) = s.jsonl_path.clone() else {
+        return;
+    };
+    match crate::turn_detail::extract_turn(std::path::Path::new(&jsonl), turn_idx as u32) {
+        Ok(td) => {
+            app.turn_detail_expanded = default_expansion(&td.blocks);
+            app.turn_detail_focused = 0;
+            app.turn_detail = Some(td);
+            app.turn_detail_scroll = 0;
+            app.mode = AppMode::TurnDetail;
+        }
+        Err(e) => {
+            app.status_msg = Some((format!("turn detail: {e}"), Instant::now()));
+        }
+    }
+}
+
+/// Decide which blocks should start expanded. Heuristic: assistant Text always
+/// expanded; Tool expanded only when its result is short or absent; Thinking
+/// always collapsed (often redacted, often verbose, almost never the thing the
+/// reader cares about).
+fn default_expansion(
+    blocks: &[crate::turn_detail::DetailBlock],
+) -> std::collections::HashSet<usize> {
+    use crate::turn_detail::DetailBlock;
+    const SHORT_RESULT_LINES: usize = 10;
+    blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(i, b)| match b {
+            DetailBlock::Text { .. } => Some(i),
+            DetailBlock::Thinking { .. } => None,
+            DetailBlock::Tool { result, .. } => match result {
+                None => Some(i),
+                Some(r) if r.content.lines().count() <= SHORT_RESULT_LINES => Some(i),
+                _ => None,
+            },
+        })
+        .collect()
+}
+
+/// Plaintext form of a block for clipboard copy. Tool blocks include the
+/// pretty-printed input followed by the result body so the user gets the full
+/// command + output in one paste.
+fn block_copy_text(b: &crate::turn_detail::DetailBlock) -> String {
+    use crate::turn_detail::DetailBlock;
+    match b {
+        DetailBlock::Text { text } => text.clone(),
+        DetailBlock::Thinking { text, redacted } => {
+            if *redacted {
+                "(thinking redacted by Claude Code)".to_string()
+            } else {
+                text.clone()
+            }
+        }
+        DetailBlock::Tool {
+            name,
+            input_pretty,
+            result,
+        } => {
+            let mut s = format!("{}\n{}", name, input_pretty);
+            if let Some(r) = result {
+                s.push_str(if r.is_error {
+                    "\n--- ERROR ---\n"
+                } else {
+                    "\n--- result ---\n"
+                });
+                s.push_str(&r.content);
+                if r.truncated {
+                    s.push_str(&format!(
+                        "\n[truncated; original {} bytes]",
+                        r.original_bytes
+                    ));
+                }
+            }
+            s
+        }
+    }
+}
+
+/// Background insights loader: parse the JSONL, persist to SQLite, update cache.
+/// No-op for non-CC sessions, missing paths, or sessions already being parsed
+/// or already cached at the current source mtime.
+fn maybe_spawn_insights_load(app: &AppState) {
+    let Some(s) = app.selected_session() else {
+        return;
+    };
+    if s.source != SessionSource::ClaudeCode {
+        return;
+    }
+    let Some(jsonl) = s.jsonl_path.clone() else {
+        return;
+    };
+    let session_id = s.session_id.clone();
+
+    // Live mtime of the JSONL.
+    let live_mtime = match std::fs::metadata(&jsonl).and_then(|m| m.modified()) {
+        Ok(t) => t
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0),
+        Err(_) => return,
+    };
+
+    // Skip if cache is fresh AND has a populated turns vector. The turns check
+    // forces a re-parse for Phase 1 cached rows that were stored before glyphs
+    // existed (rows where assistant_turns > 0 but turns is empty).
+    {
+        let cache = app.insights_cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(c) = cache.get(&session_id) {
+            let turns_ok = c.insights.assistant_turns == 0 || !c.insights.turns.is_empty();
+            if c.source_mtime >= live_mtime && turns_ok {
+                return;
+            }
+        }
+    }
+    // Guard against duplicate spawns.
+    {
+        let mut loading = app
+            .insights_loading
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if !loading.insert(session_id.clone()) {
+            return;
+        }
+    }
+
+    let cache = app.insights_cache.clone();
+    let loading = app.insights_loading.clone();
+    let db = app.db.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let parsed = crate::insights::parse_insights(std::path::Path::new(&jsonl));
+        if let Ok(insights) = parsed {
+            // Persist before updating in-memory cache so a crash mid-update
+            // doesn't leave the cache "ahead" of the DB.
+            if let Ok(conn) = db.lock() {
+                let _ =
+                    crate::store::save_insights(&conn, &session_id, "cc", live_mtime, &insights);
+            }
+            cache.lock().unwrap_or_else(|e| e.into_inner()).insert(
+                session_id.clone(),
+                crate::store::CachedInsights {
+                    source_mtime: live_mtime,
+                    insights,
+                },
+            );
+        }
+        loading
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&session_id);
     });
 }
 
@@ -1192,6 +1397,38 @@ async fn run_event_loop(
                         app.status_msg = Some(("refreshing git…".to_string(), Instant::now()));
                     }
 
+                    // i: toggle the Insights panel above the Summary
+                    (AppMode::Normal, KeyModifiers::NONE, KeyCode::Char('i')) => {
+                        app.insights_visible = !app.insights_visible;
+                    }
+
+                    // ] / [ / { / } — glyph timeline navigation in the Insights panel.
+                    // No-op when insights aren't loaded for this session yet.
+                    (AppMode::Normal, KeyModifiers::NONE, KeyCode::Char(']'))
+                    | (AppMode::Normal, KeyModifiers::NONE, KeyCode::Char('['))
+                    | (AppMode::Normal, KeyModifiers::NONE, KeyCode::Char('{'))
+                    | (AppMode::Normal, KeyModifiers::NONE, KeyCode::Char('}')) => {
+                        if let Some(turns_len) = app
+                            .selected_session()
+                            .and_then(|s| {
+                                let cache =
+                                    app.insights_cache.lock().unwrap_or_else(|e| e.into_inner());
+                                cache.get(&s.session_id).map(|c| c.insights.turns.len())
+                            })
+                            .filter(|&n| n > 0)
+                        {
+                            let last = turns_len - 1;
+                            let cur = app.glyph_cursor.unwrap_or(last);
+                            app.glyph_cursor = Some(match key.code {
+                                KeyCode::Char(']') => (cur + 1).min(last),
+                                KeyCode::Char('[') => cur.saturating_sub(1),
+                                KeyCode::Char('{') => 0,
+                                KeyCode::Char('}') => last,
+                                _ => cur,
+                            });
+                        }
+                    }
+
                     // Ctrl+R: regenerate summary + knowledge extraction
                     (AppMode::Normal, KeyModifiers::CONTROL, KeyCode::Char('r'))
                     | (AppMode::Grep, KeyModifiers::CONTROL, KeyCode::Char('r')) => {
@@ -1261,6 +1498,20 @@ async fn run_event_loop(
                     }
 
                     (AppMode::Normal, _, KeyCode::Enter) | (AppMode::Grep, _, KeyCode::Enter) => {
+                        // Intercept Enter when the Insights timeline cursor is
+                        // active on a CC session — open the turn-detail modal
+                        // instead of resuming the session in tmux.
+                        let want_detail = app.mode == AppMode::Normal
+                            && app.insights_visible
+                            && app.glyph_cursor.is_some()
+                            && app
+                                .selected_session()
+                                .map(|s| s.source == SessionSource::ClaudeCode)
+                                .unwrap_or(false);
+                        if want_detail {
+                            open_turn_detail(app);
+                            continue;
+                        }
                         if let Some(s) = app.selected_session() {
                             let path = s.project_path.clone();
                             let id = s.session_id.clone();
@@ -1504,6 +1755,132 @@ async fn run_event_loop(
                     }
                     (AppMode::Help, _, _) => {
                         app.mode = AppMode::Normal;
+                    }
+
+                    // --- Turn detail modal ---
+                    (AppMode::TurnDetail, _, KeyCode::Esc)
+                    | (AppMode::TurnDetail, _, KeyCode::Char('q')) => {
+                        app.mode = AppMode::Normal;
+                        app.turn_detail = None;
+                        app.turn_detail_scroll = 0;
+                    }
+                    (AppMode::TurnDetail, _, KeyCode::Char(']'))
+                    | (AppMode::TurnDetail, _, KeyCode::Char('[')) => {
+                        let total = app
+                            .selected_session()
+                            .and_then(|s| {
+                                let cache =
+                                    app.insights_cache.lock().unwrap_or_else(|e| e.into_inner());
+                                cache.get(&s.session_id).map(|c| c.insights.assistant_turns)
+                            })
+                            .unwrap_or(0);
+                        if let Some(td) = app.turn_detail.as_ref() {
+                            let cur = td.turn_idx;
+                            let next = match key.code {
+                                KeyCode::Char(']') => {
+                                    if total > 0 {
+                                        (cur + 1).min(total - 1)
+                                    } else {
+                                        cur
+                                    }
+                                }
+                                KeyCode::Char('[') => cur.saturating_sub(1),
+                                _ => cur,
+                            };
+                            if next != cur {
+                                if let Some(s) = app.selected_session() {
+                                    if let Some(jsonl) = s.jsonl_path.clone() {
+                                        if let Ok(new_td) = crate::turn_detail::extract_turn(
+                                            std::path::Path::new(&jsonl),
+                                            next,
+                                        ) {
+                                            app.glyph_cursor = Some(next as usize);
+                                            app.turn_detail_expanded =
+                                                default_expansion(&new_td.blocks);
+                                            app.turn_detail_focused = 0;
+                                            app.turn_detail = Some(new_td);
+                                            app.turn_detail_scroll = 0;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Up/Down (and j/k) move focused block; auto-scroll happens
+                    // in draw_turn_detail to keep the focused block visible.
+                    (AppMode::TurnDetail, _, KeyCode::Down)
+                    | (AppMode::TurnDetail, _, KeyCode::Char('j')) => {
+                        if let Some(td) = app.turn_detail.as_ref() {
+                            let n = td.blocks.len();
+                            if n > 0 {
+                                app.turn_detail_focused = (app.turn_detail_focused + 1).min(n - 1);
+                            }
+                        }
+                    }
+                    (AppMode::TurnDetail, _, KeyCode::Up)
+                    | (AppMode::TurnDetail, _, KeyCode::Char('k')) => {
+                        app.turn_detail_focused = app.turn_detail_focused.saturating_sub(1);
+                    }
+                    // PgUp/PgDn keep raw scroll for fast traversal of long expanded blocks.
+                    (AppMode::TurnDetail, _, KeyCode::PageDown) => {
+                        app.turn_detail_scroll = app.turn_detail_scroll.saturating_add(15);
+                    }
+                    (AppMode::TurnDetail, _, KeyCode::PageUp) => {
+                        app.turn_detail_scroll = app.turn_detail_scroll.saturating_sub(15);
+                    }
+                    (AppMode::TurnDetail, _, KeyCode::Home) => {
+                        app.turn_detail_focused = 0;
+                        app.turn_detail_scroll = 0;
+                    }
+                    (AppMode::TurnDetail, _, KeyCode::End) => {
+                        if let Some(td) = app.turn_detail.as_ref() {
+                            let n = td.blocks.len();
+                            if n > 0 {
+                                app.turn_detail_focused = n - 1;
+                            }
+                        }
+                        app.turn_detail_scroll = u16::MAX;
+                    }
+                    // Enter: toggle expand/collapse on focused block.
+                    (AppMode::TurnDetail, _, KeyCode::Enter) => {
+                        let i = app.turn_detail_focused;
+                        if app.turn_detail_expanded.contains(&i) {
+                            app.turn_detail_expanded.remove(&i);
+                        } else {
+                            app.turn_detail_expanded.insert(i);
+                        }
+                    }
+                    // o: expand all if any are collapsed, else collapse all.
+                    (AppMode::TurnDetail, _, KeyCode::Char('o')) => {
+                        if let Some(td) = app.turn_detail.as_ref() {
+                            let n = td.blocks.len();
+                            let all_expanded = app.turn_detail_expanded.len() == n;
+                            if all_expanded {
+                                app.turn_detail_expanded.clear();
+                            } else {
+                                app.turn_detail_expanded = (0..n).collect();
+                            }
+                        }
+                    }
+                    // c: copy focused block to clipboard.
+                    (AppMode::TurnDetail, _, KeyCode::Char('c')) => {
+                        let body = app
+                            .turn_detail
+                            .as_ref()
+                            .and_then(|td| td.blocks.get(app.turn_detail_focused))
+                            .map(block_copy_text)
+                            .unwrap_or_default();
+                        if !body.is_empty() {
+                            let msg = match copy_to_clipboard(&body) {
+                                Ok(_) => format!("Copied {} bytes to clipboard", body.len()),
+                                Err(e) => format!("Copy failed: {e}"),
+                            };
+                            app.status_msg = Some((msg, Instant::now()));
+                        }
+                    }
+                    (AppMode::TurnDetail, _, _) => {
+                        // Swallow all other keys so they don't leak through to
+                        // global handlers (which would, e.g., resume the session).
                     }
 
                     // --- Settings panel ---
@@ -1913,6 +2290,7 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
             " Weekly Digest — last 7 days ",
         ),
         AppMode::Help => ("".to_string(), " cc-speedy — Help "),
+        AppMode::TurnDetail => ("".to_string(), " cc-speedy "),
         AppMode::Normal => {
             let hint = if let Some(ref pp) = app.project_filter {
                 format!(
@@ -2023,7 +2401,36 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
             );
         }
 
-        draw_preview(f, app, panes[1], app.preview_scroll);
+        // Decide whether the right pane shows Insights above Summary.
+        // Only CC sessions get insights (OC/Copilot have no parser yet).
+        let show_insights = app.insights_visible
+            && app
+                .selected_session()
+                .map(|s| s.source == SessionSource::ClaudeCode)
+                .unwrap_or(false);
+
+        if show_insights {
+            // Auto-reset glyph cursor when the user moves to a different session
+            // so we don't carry an index that's meaningless for the new timeline.
+            let current_id = app.selected_session().map(|s| s.session_id.clone());
+            if app.last_insights_session_id != current_id {
+                app.glyph_cursor = None;
+                app.last_insights_session_id = current_id;
+            }
+
+            // Kick off background load on every frame; the helper is idempotent.
+            maybe_spawn_insights_load(app);
+
+            let insights_height: u16 = compute_insights_height(app);
+            let right_split = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(insights_height), Constraint::Min(0)])
+                .split(panes[1]);
+            draw_insights(f, app, right_split[0]);
+            draw_preview(f, app, right_split[1], app.preview_scroll);
+        } else {
+            draw_preview(f, app, panes[1], app.preview_scroll);
+        }
     } // end of non-library branch
 
     // Background jobs panel
@@ -2079,6 +2486,9 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
     }
     if app.mode == AppMode::Help {
         draw_help_popup(f, area);
+    }
+    if app.mode == AppMode::TurnDetail {
+        draw_turn_detail(f, app, area);
     }
 }
 
@@ -2544,6 +2954,275 @@ fn build_preview_content(app: &AppState) -> String {
     }
 }
 
+/// Number of rows the Insights panel occupies in the right pane (incl. borders).
+/// Returns 4 when the data is still loading or empty (just the header strip).
+/// Otherwise: borders + header + spacer + tool rows + skill/agent line + spacer
+/// + timeline rows + focused-turn label.
+fn compute_insights_height(app: &AppState) -> u16 {
+    let Some(s) = app.selected_session() else {
+        return 4;
+    };
+    let cache = app.insights_cache.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(c) = cache.get(&s.session_id) else {
+        return 4;
+    };
+    let i = &c.insights;
+    if i.is_empty() {
+        return 4;
+    }
+    let tool_rows = i.tool_counts.len().min(4) as u16;
+    let extras = if i.skills.is_empty() && i.tasks.is_empty() {
+        0
+    } else {
+        1
+    };
+    let timeline_rows: u16 = if i.turns.is_empty() {
+        0
+    } else {
+        // 1 spacer + up to TIMELINE_MAX_ROWS rows + 1 label line.
+        1 + TIMELINE_MAX_ROWS + 1
+    };
+    // 3 = top border + title + bottom border. 1 = spacer below header.
+    3 + 1 + tool_rows + extras + timeline_rows
+}
+
+/// Maximum visible rows of the glyph timeline. When the session has more glyphs
+/// than `TIMELINE_MAX_ROWS * inner_width`, we scroll a window around the cursor
+/// (or show the tail when there's no cursor).
+const TIMELINE_MAX_ROWS: u16 = 3;
+
+/// Render the Insights panel: header strip + tool histogram + skill/sub-agent line.
+fn draw_insights(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
+    let block = Block::default()
+        .border_type(theme::BORDER_TYPE)
+        .borders(Borders::ALL)
+        .border_style(theme::panel_block_style(theme::BORDER_PREVIEW))
+        .title(Span::styled(
+            " Insights  [i: hide  ]/[: step] ",
+            theme::title_style(),
+        ));
+
+    let inner_width = area.width.saturating_sub(2) as usize;
+
+    let session_id = match app.selected_session().map(|s| s.session_id.clone()) {
+        Some(id) => id,
+        None => {
+            f.render_widget(Paragraph::new("").block(block), area);
+            return;
+        }
+    };
+
+    let cached = {
+        let cache = app.insights_cache.lock().unwrap_or_else(|e| e.into_inner());
+        cache.get(&session_id).cloned()
+    };
+    let cursor = app.glyph_cursor;
+
+    let lines: Vec<Line> = match cached {
+        None => vec![Line::from(Span::styled(
+            "loading insights…",
+            Style::default().fg(theme::FG_DIM),
+        ))],
+        Some(c) if c.insights.is_empty() => vec![Line::from(Span::styled(
+            "no assistant turns recorded",
+            Style::default().fg(theme::FG_DIM),
+        ))],
+        Some(c) => render_insights_lines(&c.insights, inner_width, cursor),
+    };
+
+    let para = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false });
+    f.render_widget(para, area);
+}
+
+/// Build the styled lines for the insights panel.
+fn render_insights_lines(
+    i: &crate::insights::SessionInsights,
+    inner_width: usize,
+    cursor: Option<usize>,
+) -> Vec<Line<'static>> {
+    use crate::insights::fmt_tokens;
+    use ratatui::style::{Color, Modifier};
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    // Header strip
+    let model_short = short_model_name(&i.model);
+    let header = format!(
+        "{} · {} turns · {}↑ {}↓ · cache {}% · sub×{}",
+        model_short,
+        i.assistant_turns,
+        fmt_tokens(i.input_tokens),
+        fmt_tokens(i.output_tokens),
+        i.cache_hit_pct(),
+        i.sidechain_lines,
+    );
+    lines.push(Line::from(Span::styled(
+        header,
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+
+    // Spacer
+    lines.push(Line::from(""));
+
+    // Tool histogram (top 4 by count)
+    let max_count = i
+        .tool_counts
+        .iter()
+        .map(|(_, c, _)| *c)
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    // Reserve room: name (8) + space + bar (max ~16) + space + count + optional " ⚠N"
+    let bar_width: usize = inner_width.saturating_sub(8 + 1 + 6 + 8).clamp(4, 18);
+    for (name, count, errs) in i.tool_counts.iter().take(4) {
+        let filled = ((*count as usize * bar_width) / max_count as usize).max(1);
+        let bar: String = "█".repeat(filled);
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        spans.push(Span::styled(
+            format!("{:<8}", name),
+            Style::default().fg(theme::FG_DIM),
+        ));
+        spans.push(Span::styled(bar, Style::default().fg(Color::Cyan)));
+        spans.push(Span::raw(format!(" {}", count)));
+        if *errs > 0 {
+            spans.push(Span::styled(
+                format!(" ⚠{}", errs),
+                Style::default().fg(Color::Red),
+            ));
+        }
+        lines.push(Line::from(spans));
+    }
+
+    // Skills + sub-agents (one combined line)
+    if !i.skills.is_empty() || !i.tasks.is_empty() {
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        if !i.skills.is_empty() {
+            let s = i
+                .skills
+                .iter()
+                .map(|s| short_skill_name(s))
+                .collect::<Vec<_>>()
+                .join(", ");
+            spans.push(Span::styled("Skill   ", Style::default().fg(theme::FG_DIM)));
+            spans.push(Span::styled(s, Style::default().fg(Color::Magenta)));
+        }
+        if !i.tasks.is_empty() {
+            if !spans.is_empty() {
+                spans.push(Span::raw("  "));
+            }
+            spans.push(Span::styled("Agent → ", Style::default().fg(theme::FG_DIM)));
+            spans.push(Span::styled(
+                i.tasks.join(", "),
+                Style::default().fg(Color::Yellow),
+            ));
+        }
+        lines.push(Line::from(spans));
+    }
+
+    // Glyph timeline + focused-turn label
+    if !i.turns.is_empty() && inner_width >= 4 {
+        lines.push(Line::from(""));
+        let effective_cursor = cursor.map(|c| c.min(i.turns.len().saturating_sub(1)));
+        let (rows, win_start) = render_glyph_timeline(&i.turns, inner_width, effective_cursor);
+        for row in rows {
+            lines.push(row);
+        }
+        // Label line: shows current cursor turn or last turn when no cursor.
+        let focus_idx = effective_cursor.unwrap_or(i.turns.len().saturating_sub(1));
+        if let Some(t) = i.turns.get(focus_idx) {
+            let cursor_marker = if effective_cursor.is_some() {
+                "▶"
+            } else {
+                " "
+            };
+            let win_hint = if win_start > 0 {
+                format!(" (showing from turn {})", win_start)
+            } else {
+                String::new()
+            };
+            let err = if t.has_error { "  ⚠" } else { "" };
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{} turn {}: ", cursor_marker, t.turn + 1),
+                    Style::default().fg(theme::FG_DIM),
+                ),
+                Span::raw(t.label.clone()),
+                Span::styled(err.to_string(), Style::default().fg(Color::Red)),
+                Span::styled(win_hint, Style::default().fg(theme::FG_DIM)),
+            ]));
+        }
+    }
+
+    lines
+}
+
+/// Render the glyph timeline as up to `TIMELINE_MAX_ROWS` lines of glyphs.
+/// When `turns.len() > rows * inner_width`, we slice a window:
+/// - cursor present → window centered on cursor
+/// - cursor absent  → window aligned to the tail (most recent turns)
+///
+/// Returns (lines, window_start_turn). When `window_start_turn > 0` the caller
+/// shows a hint so the user knows the visible range is a tail.
+fn render_glyph_timeline(
+    turns: &[crate::insights::TurnGlyph],
+    inner_width: usize,
+    cursor: Option<usize>,
+) -> (Vec<Line<'static>>, usize) {
+    use crate::insights::GlyphCategory;
+    use ratatui::style::{Color, Modifier};
+
+    let cap = inner_width * TIMELINE_MAX_ROWS as usize;
+    let total = turns.len();
+
+    let win_start = if total <= cap {
+        0
+    } else if let Some(c) = cursor {
+        // Center window on cursor, clamped to [0, total - cap].
+        let half = cap / 2;
+        c.saturating_sub(half).min(total - cap)
+    } else {
+        total - cap
+    };
+    let win_end = (win_start + cap).min(total);
+    let visible = &turns[win_start..win_end];
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for chunk in visible.chunks(inner_width) {
+        let mut spans: Vec<Span<'static>> = Vec::with_capacity(chunk.len());
+        for (i, t) in chunk.iter().enumerate() {
+            let abs_idx = win_start + (lines.len() * inner_width) + i;
+            let mut style = match t.category {
+                GlyphCategory::Task => Style::default().fg(Color::Yellow),
+                GlyphCategory::Skill => Style::default().fg(Color::Magenta),
+                GlyphCategory::Tool => Style::default().fg(Color::Cyan),
+                GlyphCategory::Thinking => Style::default().fg(theme::FG_DIM),
+                GlyphCategory::Text => Style::default().fg(Color::Green),
+            };
+            if t.has_error {
+                style = style.fg(Color::Red);
+            }
+            if Some(abs_idx) == cursor {
+                style = style.add_modifier(Modifier::REVERSED | Modifier::BOLD);
+            }
+            spans.push(Span::styled(t.glyph.to_string(), style));
+        }
+        lines.push(Line::from(spans));
+    }
+    (lines, win_start)
+}
+
+/// Trim "claude-" prefix if present so the header strip is compact.
+fn short_model_name(model: &str) -> String {
+    model.strip_prefix("claude-").unwrap_or(model).to_string()
+}
+
+/// Drop "superpowers:" / similar plugin-prefix from skill names for compactness.
+fn short_skill_name(skill: &str) -> String {
+    skill.split(':').next_back().unwrap_or(skill).to_string()
+}
+
 fn draw_preview(f: &mut ratatui::Frame, app: &mut AppState, area: Rect, scroll: u16) {
     let content = build_preview_content(app);
 
@@ -2694,6 +3373,283 @@ fn draw_pin_popup(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
     f.render_widget(popup, popup_area);
 }
 
+/// Render the per-turn detail modal (Phase 3a). Always-expanded blocks; no
+/// per-block focus. Navigation: `[`/`]` adjacent turns, arrows scroll, Esc closes.
+fn draw_turn_detail(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
+    use crate::insights::fmt_tokens;
+    use crate::turn_detail::DetailBlock;
+    use ratatui::style::{Color, Modifier};
+
+    let Some(td) = app.turn_detail.as_ref() else {
+        return;
+    };
+
+    let modal_w = area.width.saturating_sub(4).max(40);
+    let modal_h = area.height.saturating_sub(2).max(10);
+    let modal = centered_rect(modal_w, modal_h, area);
+    f.render_widget(Clear, modal);
+
+    let total_turns: u32 = app
+        .selected_session()
+        .and_then(|s| {
+            let cache = app.insights_cache.lock().unwrap_or_else(|e| e.into_inner());
+            cache.get(&s.session_id).map(|c| c.insights.assistant_turns)
+        })
+        .unwrap_or(0);
+
+    let any_error = td
+        .blocks
+        .iter()
+        .any(|b| matches!(b, DetailBlock::Tool { result: Some(r), .. } if r.is_error));
+
+    let title = format!(
+        " Turn {} / {}{}  ·  {}  [Esc to close] ",
+        td.turn_idx + 1,
+        total_turns,
+        if any_error { "  ⚠" } else { "" },
+        td.model,
+    );
+
+    let block = Block::default()
+        .border_type(theme::BORDER_TYPE)
+        .borders(Borders::ALL)
+        .border_style(theme::panel_block_style(theme::BORDER_FOCUSED))
+        .title(Span::styled(title, theme::title_style()));
+
+    let focused = app
+        .turn_detail_focused
+        .min(td.blocks.len().saturating_sub(1));
+    let expanded = &app.turn_detail_expanded;
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    // (start_line, end_line) per block — used for auto-scroll math.
+    let mut block_ranges: Vec<(u16, u16)> = Vec::with_capacity(td.blocks.len());
+
+    if let Some(u) = td.user_msg.as_ref() {
+        lines.push(Line::from(Span::styled(
+            "user",
+            Style::default()
+                .fg(theme::FG_DIM)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for l in u.lines() {
+            lines.push(Line::from(format!("  {}", l)));
+        }
+        lines.push(Line::from(""));
+    }
+
+    for (i, b) in td.blocks.iter().enumerate() {
+        let start = lines.len() as u16;
+        let is_focused = i == focused;
+        let is_expanded = expanded.contains(&i);
+        let chevron = if is_expanded { "▾" } else { "▸" };
+        let focus_prefix = if is_focused { "▶ " } else { "  " };
+        let focus_style = |s: Style| {
+            if is_focused {
+                s.add_modifier(Modifier::REVERSED)
+            } else {
+                s
+            }
+        };
+
+        match b {
+            DetailBlock::Thinking { text, redacted } => {
+                let detail = if *redacted {
+                    "redacted".to_string()
+                } else {
+                    let n = text.lines().count();
+                    format!("{} line{}", n, if n == 1 { "" } else { "s" })
+                };
+                let header = format!("{}{} thinking · {}", focus_prefix, chevron, detail);
+                lines.push(Line::from(Span::styled(
+                    header,
+                    focus_style(
+                        Style::default()
+                            .fg(theme::FG_DIM)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                )));
+                if is_expanded {
+                    if *redacted {
+                        lines.push(Line::from(Span::styled(
+                            "    (encrypted signature only — no plaintext available)",
+                            Style::default().fg(theme::FG_DIM),
+                        )));
+                    } else {
+                        for l in text.lines() {
+                            lines.push(Line::from(Span::styled(
+                                format!("    {}", l),
+                                Style::default().fg(theme::FG_DIM),
+                            )));
+                        }
+                    }
+                }
+            }
+            DetailBlock::Text { text } => {
+                let n = text.lines().count();
+                let header = format!(
+                    "{}{} assistant · {} line{}",
+                    focus_prefix,
+                    chevron,
+                    n,
+                    if n == 1 { "" } else { "s" }
+                );
+                lines.push(Line::from(Span::styled(
+                    header,
+                    focus_style(
+                        Style::default()
+                            .fg(Color::Green)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                )));
+                if is_expanded {
+                    for l in text.lines() {
+                        lines.push(Line::from(format!("    {}", l)));
+                    }
+                } else if let Some(first) = text.lines().next() {
+                    let preview: String = first.chars().take(120).collect();
+                    lines.push(Line::from(Span::styled(
+                        format!(
+                            "    {}{}",
+                            preview,
+                            if first.len() > preview.len() {
+                                "…"
+                            } else {
+                                ""
+                            }
+                        ),
+                        Style::default().fg(theme::FG_DIM),
+                    )));
+                }
+            }
+            DetailBlock::Tool {
+                name,
+                input_pretty,
+                result,
+            } => {
+                let glyph = crate::insights::tool_to_glyph(name);
+                let header = format!("{}{} {} {}", focus_prefix, chevron, glyph, name);
+                lines.push(Line::from(Span::styled(
+                    header,
+                    focus_style(
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                )));
+                // Tool input is always shown — it's typically short and the
+                // most informative part of a tool call.
+                for l in input_pretty.lines() {
+                    lines.push(Line::from(Span::styled(
+                        format!("    {}", l),
+                        Style::default().fg(theme::FG_DIM),
+                    )));
+                }
+                if let Some(r) = result {
+                    let (mark, color) = if r.is_error {
+                        ("✗", Color::Red)
+                    } else {
+                        ("✓", Color::Green)
+                    };
+                    let result_lines = r.content.lines().count();
+                    let result_header = if r.truncated {
+                        format!(
+                            "    {} result · {} lines · truncated ({} of {} bytes)",
+                            mark,
+                            result_lines,
+                            fmt_tokens(r.content.len() as u64),
+                            fmt_tokens(r.original_bytes as u64),
+                        )
+                    } else {
+                        format!(
+                            "    {} result · {} line{} · {} bytes",
+                            mark,
+                            result_lines,
+                            if result_lines == 1 { "" } else { "s" },
+                            r.content.len()
+                        )
+                    };
+                    lines.push(Line::from(Span::styled(
+                        result_header,
+                        Style::default().fg(color),
+                    )));
+                    if is_expanded {
+                        for l in r.content.lines() {
+                            lines.push(Line::from(format!("      {}", l)));
+                        }
+                    } else if result_lines > 0 {
+                        lines.push(Line::from(Span::styled(
+                            "      (Enter to expand)",
+                            Style::default().fg(theme::FG_DIM),
+                        )));
+                    }
+                } else {
+                    lines.push(Line::from(Span::styled(
+                        "    (no result captured)",
+                        Style::default().fg(theme::FG_DIM),
+                    )));
+                }
+            }
+        }
+        // blank line between blocks
+        lines.push(Line::from(""));
+        let end = lines.len() as u16;
+        block_ranges.push((start, end));
+    }
+
+    let footer = format!(
+        "── {}↑ {}↓ · cache {}% · cache_create {} ──",
+        fmt_tokens(td.usage.input_tokens),
+        fmt_tokens(td.usage.output_tokens),
+        td.usage.cache_hit_pct(),
+        fmt_tokens(td.usage.cache_creation),
+    );
+    lines.push(Line::from(Span::styled(
+        footer,
+        Style::default().fg(theme::FG_DIM),
+    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "[ / ]  prev/next turn   ↑ ↓  focus   Enter  expand   o  all   c  copy   PgUp/PgDn  scroll   Esc  close",
+        Style::default().fg(theme::FG_DIM),
+    )));
+
+    // Auto-scroll: keep the focused block in view. Inner viewport height is the
+    // modal height minus 2 for the borders.
+    let viewport_h = modal.height.saturating_sub(2);
+    if let Some(&(b_start, b_end)) = block_ranges.get(focused) {
+        let scroll = app.turn_detail_scroll;
+        let block_h = b_end.saturating_sub(b_start);
+        let visible_end = scroll.saturating_add(viewport_h);
+        let new_scroll = if block_h >= viewport_h {
+            // Block is taller than the viewport. If any part is visible, leave
+            // the scroll alone — otherwise we'd oscillate every frame between
+            // "snap b_start to top" and "snap b_end to bottom" (the blink).
+            // PgUp / PgDn give the user manual scroll inside a tall block.
+            if b_end <= scroll || b_start >= visible_end {
+                b_start
+            } else {
+                scroll
+            }
+        } else if b_start < scroll {
+            b_start
+        } else if b_end > visible_end {
+            b_end.saturating_sub(viewport_h)
+        } else {
+            scroll
+        };
+        if new_scroll != scroll {
+            app.turn_detail_scroll = new_scroll;
+        }
+    }
+
+    let para = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false })
+        .scroll((app.turn_detail_scroll, 0));
+    f.render_widget(para, modal);
+}
+
 fn draw_help_popup(f: &mut ratatui::Frame, area: Rect) {
     let popup_area = centered_rect(72, 34, area);
     f.render_widget(Clear, popup_area);
@@ -2725,6 +3681,12 @@ fn draw_help_popup(f: &mut ratatui::Frame, area: Rect) {
         Line::from("    Ctrl+R       (re)generate summary + extract learnings"),
         Line::from("    o            save current summary to Obsidian"),
         Line::from("    c            copy summary to clipboard"),
+        Line::from("    i            toggle Insights panel (CC sessions only)"),
+        Line::from("    [ / ]        step glyph timeline cursor    { / }  jump to first / last"),
+        Line::from("    Enter        open turn-detail modal (when cursor is set)"),
+        Line::from(
+            "                 in modal: ↑/↓ focus block · Enter expand/collapse · o all · c copy",
+        ),
         Line::from(""),
         Line::from(vec![Span::styled("  Row glyphs", theme::title_style())]),
         Line::from(vec![

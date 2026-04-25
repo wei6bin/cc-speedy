@@ -183,7 +183,7 @@ fn test_parse_status_unrecognised_value() {
 }
 
 use cc_speedy::obsidian::build_frontmatter_tags;
-use cc_speedy::obsidian::{build_daily_line, note_stem_for_session};
+use cc_speedy::obsidian::{build_daily_line, extract_factual_title, note_stem_for_session};
 
 fn lp(cat: &str) -> LearningPoint {
     LearningPoint {
@@ -350,4 +350,22 @@ fn test_daily_line_truncates_title_to_80_chars_unicode_safe() {
     // The title chunk inside the line should be at most 80 chars from the long string.
     let count = line.matches("あ").count();
     assert!(count <= 80, "expected ≤80 occurrences, got {}", count);
+}
+
+#[test]
+fn test_extract_title_returns_first_bullet() {
+    let body = "## What was done\n- fixed bug\n- did other thing\n";
+    assert_eq!(extract_factual_title(body), "fixed bug");
+}
+
+#[test]
+fn test_extract_title_skips_blank_lines() {
+    let body = "## What was done\n\n\n- delayed bullet\n";
+    assert_eq!(extract_factual_title(body), "delayed bullet");
+}
+
+#[test]
+fn test_extract_title_missing_section() {
+    let body = "## Status\nCompleted\n";
+    assert_eq!(extract_factual_title(body), "");
 }

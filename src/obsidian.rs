@@ -105,6 +105,28 @@ pub fn note_stem_for_session(session: &UnifiedSession, date_str: &str) -> String
     format!("{}-{}-{}", date_str, project_slug, id_prefix)
 }
 
+/// Pull the first non-empty bullet under `## What was done` for use as the
+/// daily-note line title. Empty string if not found.
+pub fn extract_factual_title(factual: &str) -> String {
+    let mut lines = factual.lines();
+    while let Some(l) = lines.next() {
+        if l.trim().eq_ignore_ascii_case("## What was done") {
+            for next in lines.by_ref() {
+                let t = next.trim();
+                if t.is_empty() {
+                    continue;
+                }
+                if let Some(rest) = t.strip_prefix("- ") {
+                    return rest.to_string();
+                }
+                // First non-empty non-bullet line — use it as-is.
+                return t.to_string();
+            }
+        }
+    }
+    String::new()
+}
+
 /// Build the bullet line that gets appended to today's daily note.
 pub fn build_daily_line(
     session: &UnifiedSession,

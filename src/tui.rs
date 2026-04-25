@@ -1,3 +1,5 @@
+use crate::theme;
+use crate::unified::{list_all_sessions, SessionSource, UnifiedSession};
 use anyhow::Result;
 use crossterm::{
     event::{self, Event, KeyCode, KeyModifiers},
@@ -15,17 +17,39 @@ use ratatui::{
 use std::io::stdout;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use crate::unified::{list_all_sessions, UnifiedSession, SessionSource};
-use crate::theme;
 
 #[derive(PartialEq, Copy, Clone)]
-enum Focus { ActiveList, ArchivedList, Preview }
+enum Focus {
+    ActiveList,
+    ArchivedList,
+    Preview,
+}
 
 #[derive(PartialEq)]
-enum AppMode { Normal, Filter, Grep, Rename, ActionMenu, Settings, Library, LibraryFilter, Projects, ProjectsFilter, TagEdit, LinkPicker, LinkPickerFilter, Digest, Help }
+enum AppMode {
+    Normal,
+    Filter,
+    Grep,
+    Rename,
+    ActionMenu,
+    Settings,
+    Library,
+    LibraryFilter,
+    Projects,
+    ProjectsFilter,
+    TagEdit,
+    LinkPicker,
+    LinkPickerFilter,
+    Digest,
+    Help,
+}
 
 #[derive(PartialEq, Copy, Clone)]
-pub enum ProjectSort { LastActive, SessionCount, Alphabetical }
+pub enum ProjectSort {
+    LastActive,
+    SessionCount,
+    Alphabetical,
+}
 
 pub struct ProjectRow {
     pub project_path: String,
@@ -54,7 +78,7 @@ struct AppState {
     focus: Focus,
     preview_scroll: u16,
     status_msg: Option<(String, Instant)>,
-    source_filter: Option<SessionSource>,  // None = all, Some(CC) = CC only, Some(OC) = OC only
+    source_filter: Option<SessionSource>, // None = all, Some(CC) = CC only, Some(OC) = OC only
     pinned: std::collections::HashSet<String>,
     archived: std::collections::HashSet<String>,
     has_learnings: std::collections::HashSet<String>,
@@ -62,11 +86,12 @@ struct AppState {
     db: Arc<Mutex<rusqlite::Connection>>,
     /// Live git status per unique project_path. Populated by a startup batch
     /// and refreshed on selection change (30s stale) and manual `g`.
-    git_status: Arc<Mutex<std::collections::HashMap<String, (crate::git_status::GitStatus, Instant)>>>,
+    git_status:
+        Arc<Mutex<std::collections::HashMap<String, (crate::git_status::GitStatus, Instant)>>>,
     /// Learning Library state — populated on `L` entry, cleared on Esc.
     library_entries: Vec<crate::store::LearningEntry>,
     library_filter: String,
-    library_category: Option<String>,  // None = all
+    library_category: Option<String>, // None = all
     library_filtered: Vec<usize>,
     library_list_state: ListState,
     /// Project Dashboard state.
@@ -114,10 +139,10 @@ impl AppState {
                 }
             }
         }
-        let generated_at  = crate::store::load_all_generated_at(&conn)?;
-        let pinned        = crate::store::load_pinned(&conn)?;
-        let archived       = crate::store::load_all_archived(&conn)?;
-        let has_learnings  = crate::store::load_sessions_with_learnings(&conn)?;
+        let generated_at = crate::store::load_all_generated_at(&conn)?;
+        let pinned = crate::store::load_pinned(&conn)?;
+        let archived = crate::store::load_all_archived(&conn)?;
+        let has_learnings = crate::store::load_sessions_with_learnings(&conn)?;
         let obsidian_synced = crate::store::load_obsidian_synced(&conn).unwrap_or_default();
         let tags_by_session = crate::store::load_all_tags(&conn).unwrap_or_default();
         let parent_of = crate::store::load_all_links(&conn).unwrap_or_default();
@@ -184,7 +209,10 @@ impl AppState {
             .sessions
             .iter()
             .map(|s| {
-                let summary_body = summaries.get(&s.session_id).map(|v| v.as_str()).unwrap_or("");
+                let summary_body = summaries
+                    .get(&s.session_id)
+                    .map(|v| v.as_str())
+                    .unwrap_or("");
                 format!(
                     "{}\n{}\n{}\n{}",
                     s.summary, s.project_path, s.git_branch, summary_body,
@@ -204,7 +232,11 @@ impl AppState {
             .iter()
             .enumerate()
             .filter(|(_, s)| {
-                if current.as_ref().map(|id| id == &s.session_id).unwrap_or(false) {
+                if current
+                    .as_ref()
+                    .map(|id| id == &s.session_id)
+                    .unwrap_or(false)
+                {
                     return false;
                 }
                 q.is_empty()
@@ -232,13 +264,19 @@ impl AppState {
     fn sort_projects(&mut self) {
         match self.projects_sort {
             ProjectSort::LastActive => {
-                self.projects.sort_by(|a, b| b.last_active.cmp(&a.last_active));
+                self.projects
+                    .sort_by(|a, b| b.last_active.cmp(&a.last_active));
             }
             ProjectSort::SessionCount => {
-                self.projects.sort_by(|a, b| b.session_count.cmp(&a.session_count).then(b.last_active.cmp(&a.last_active)));
+                self.projects.sort_by(|a, b| {
+                    b.session_count
+                        .cmp(&a.session_count)
+                        .then(b.last_active.cmp(&a.last_active))
+                });
             }
             ProjectSort::Alphabetical => {
-                self.projects.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                self.projects
+                    .sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
             }
         }
     }
@@ -270,7 +308,9 @@ impl AppState {
             .enumerate()
             .filter(|(_, e)| {
                 if let Some(c) = cat {
-                    if e.category != c { return false; }
+                    if e.category != c {
+                        return false;
+                    }
                 }
                 q.is_empty() || e.point.to_lowercase().contains(&q)
             })
@@ -295,8 +335,13 @@ impl AppState {
         let archived = &self.archived;
 
         let matches_grep = |idx: usize| -> bool {
-            if !grep_active { return true; }
-            self.grep_haystacks.get(idx).map(|h| h.contains(&grep_q)).unwrap_or(false)
+            if !grep_active {
+                return true;
+            }
+            self.grep_haystacks
+                .get(idx)
+                .map(|h| h.contains(&grep_q))
+                .unwrap_or(false)
         };
 
         let pf = self.project_filter.clone();
@@ -307,26 +352,37 @@ impl AppState {
             .iter()
             .enumerate()
             .filter(|(i, s)| {
-                if archived.contains(&s.session_id) { return false; }
+                if archived.contains(&s.session_id) {
+                    return false;
+                }
                 if let Some(ref sf) = self.source_filter {
-                    if &s.source != sf { return false; }
+                    if &s.source != sf {
+                        return false;
+                    }
                 }
                 if let Some(ref pp) = pf {
-                    if &s.project_path != pp { return false; }
+                    if &s.project_path != pp {
+                        return false;
+                    }
                 }
-                if !matches_grep(*i) { return false; }
+                if !matches_grep(*i) {
+                    return false;
+                }
                 // All tag tokens must be present on this session.
                 if !tag_tokens_lc.is_empty() {
                     let tags = self.tags_by_session.get(&s.session_id);
                     for wanted in &tag_tokens_lc {
                         let ok = tags.map(|v| v.iter().any(|t| t == wanted)).unwrap_or(false);
-                        if !ok { return false; }
+                        if !ok {
+                            return false;
+                        }
                     }
                 }
                 // All text tokens must match title or project_name.
                 for tok in &text_tokens_lc {
                     if !(s.project_name.to_lowercase().contains(tok)
-                        || s.summary.to_lowercase().contains(tok)) {
+                        || s.summary.to_lowercase().contains(tok))
+                    {
                         return false;
                     }
                 }
@@ -340,26 +396,37 @@ impl AppState {
             .iter()
             .enumerate()
             .filter(|(i, s)| {
-                if !archived.contains(&s.session_id) { return false; }
+                if !archived.contains(&s.session_id) {
+                    return false;
+                }
                 if let Some(ref sf) = self.source_filter {
-                    if &s.source != sf { return false; }
+                    if &s.source != sf {
+                        return false;
+                    }
                 }
                 if let Some(ref pp) = pf {
-                    if &s.project_path != pp { return false; }
+                    if &s.project_path != pp {
+                        return false;
+                    }
                 }
-                if !matches_grep(*i) { return false; }
+                if !matches_grep(*i) {
+                    return false;
+                }
                 // All tag tokens must be present on this session.
                 if !tag_tokens_lc.is_empty() {
                     let tags = self.tags_by_session.get(&s.session_id);
                     for wanted in &tag_tokens_lc {
                         let ok = tags.map(|v| v.iter().any(|t| t == wanted)).unwrap_or(false);
-                        if !ok { return false; }
+                        if !ok {
+                            return false;
+                        }
                     }
                 }
                 // All text tokens must match title or project_name.
                 for tok in &text_tokens_lc {
                     if !(s.project_name.to_lowercase().contains(tok)
-                        || s.summary.to_lowercase().contains(tok)) {
+                        || s.summary.to_lowercase().contains(tok))
+                    {
                         return false;
                     }
                 }
@@ -370,7 +437,11 @@ impl AppState {
 
         // Sort active: pinned first, then by recency
         active_indices.sort_by_key(|&i| {
-            if pinned.contains(&self.sessions[i].session_id) { 0u8 } else { 1u8 }
+            if pinned.contains(&self.sessions[i].session_id) {
+                0u8
+            } else {
+                1u8
+            }
         });
 
         // Sort archived by recency
@@ -443,13 +514,15 @@ pub fn build_project_rows(
     use std::collections::HashMap;
     let mut acc: HashMap<String, ProjectRow> = HashMap::new();
     for s in sessions {
-        let row = acc.entry(s.project_path.clone()).or_insert_with(|| ProjectRow {
-            project_path: s.project_path.clone(),
-            name: crate::util::path_last_n(&s.project_path, 2),
-            session_count: 0,
-            pinned_count: 0,
-            last_active: std::time::UNIX_EPOCH,
-        });
+        let row = acc
+            .entry(s.project_path.clone())
+            .or_insert_with(|| ProjectRow {
+                project_path: s.project_path.clone(),
+                name: crate::util::path_last_n(&s.project_path, 2),
+                session_count: 0,
+                pinned_count: 0,
+                last_active: std::time::UNIX_EPOCH,
+            });
         row.session_count += 1;
         if pinned.contains(&s.session_id) {
             row.pinned_count += 1;
@@ -480,7 +553,9 @@ fn spawn_git_status_batch(app: &AppState) {
 /// fresh (hashmap lookup + instant comparison).
 fn maybe_refresh_selected_git(app: &AppState) {
     const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
-    let Some(s) = app.selected_session() else { return; };
+    let Some(s) = app.selected_session() else {
+        return;
+    };
     let path = s.project_path.clone();
     let needs_refresh = {
         let cache = app.git_status.lock().unwrap_or_else(|e| e.into_inner());
@@ -549,7 +624,12 @@ async fn run_event_loop(
 
         // Tick faster while a summary is generating so the spinner animates smoothly;
         // idle redraws stay at 200ms to avoid wasted work.
-        let poll_ms = if app.generating.lock().map(|g| !g.is_empty()).unwrap_or(false) {
+        let poll_ms = if app
+            .generating
+            .lock()
+            .map(|g| !g.is_empty())
+            .unwrap_or(false)
+        {
             120
         } else {
             200
@@ -565,13 +645,15 @@ async fn run_event_loop(
                     (AppMode::Normal, _, KeyCode::Esc) if app.project_filter.is_some() => {
                         app.project_filter = None;
                         app.apply_filter();
-                        app.status_msg = Some(("Project filter cleared".to_string(), Instant::now()));
+                        app.status_msg =
+                            Some(("Project filter cleared".to_string(), Instant::now()));
                     }
 
                     // --- Weekly Digest ---
                     (AppMode::Normal, _, KeyCode::Char('D')) => {
                         let conn = app.db.lock().unwrap_or_else(|e| e.into_inner());
-                        let learnings_raw = crate::store::load_all_learnings(&conn).unwrap_or_default();
+                        let learnings_raw =
+                            crate::store::load_all_learnings(&conn).unwrap_or_default();
                         drop(conn);
                         let joined: Vec<crate::digest::LearningWithSession> = learnings_raw
                             .into_iter()
@@ -583,7 +665,10 @@ async fn run_event_loop(
                             })
                             .collect();
                         let data = crate::digest::build_digest(
-                            &app.sessions, &joined, 7, std::time::SystemTime::now(),
+                            &app.sessions,
+                            &joined,
+                            7,
+                            std::time::SystemTime::now(),
                         );
                         app.digest_text = crate::digest::render_digest(&data);
                         app.digest_scroll = 0;
@@ -608,15 +693,24 @@ async fn run_event_loop(
                             Some(path) => {
                                 match crate::obsidian::export_digest(&path, &app.digest_text) {
                                     Ok(rel) => {
-                                        app.status_msg = Some((format!("Digest exported: {rel}"), Instant::now()));
+                                        app.status_msg = Some((
+                                            format!("Digest exported: {rel}"),
+                                            Instant::now(),
+                                        ));
                                     }
                                     Err(e) => {
-                                        app.status_msg = Some((format!("Digest export failed: {e}"), Instant::now()));
+                                        app.status_msg = Some((
+                                            format!("Digest export failed: {e}"),
+                                            Instant::now(),
+                                        ));
                                     }
                                 }
                             }
                             None => {
-                                app.status_msg = Some(("No Obsidian path set — see `s` for settings".to_string(), Instant::now()));
+                                app.status_msg = Some((
+                                    "No Obsidian path set — see `s` for settings".to_string(),
+                                    Instant::now(),
+                                ));
                             }
                         }
                     }
@@ -673,14 +767,16 @@ async fn run_event_loop(
                         if let (Some(cid), Some(pid)) = (child, parent) {
                             match crate::store::set_link(
                                 &app.db.lock().unwrap_or_else(|e| e.into_inner()),
-                                &cid, &pid,
+                                &cid,
+                                &pid,
                             ) {
                                 Ok(()) => {
                                     app.parent_of.insert(cid, pid);
                                     app.status_msg = Some(("Linked".to_string(), Instant::now()));
                                 }
                                 Err(e) => {
-                                    app.status_msg = Some((format!("Link failed: {e}"), Instant::now()));
+                                    app.status_msg =
+                                        Some((format!("Link failed: {e}"), Instant::now()));
                                 }
                             }
                         }
@@ -710,7 +806,8 @@ async fn run_event_loop(
                     (AppMode::Normal, KeyModifiers::NONE, KeyCode::Char('t')) => {
                         if let Some(s) = app.selected_session() {
                             let sid = s.session_id.clone();
-                            let current = app.tags_by_session.get(&sid).cloned().unwrap_or_default();
+                            let current =
+                                app.tags_by_session.get(&sid).cloned().unwrap_or_default();
                             app.tag_edit_input = current.join(", ");
                             app.mode = AppMode::TagEdit;
                         }
@@ -734,11 +831,13 @@ async fn run_event_loop(
                                     } else {
                                         app.tags_by_session.insert(sid, parsed);
                                     }
-                                    app.status_msg = Some(("Tags saved".to_string(), Instant::now()));
+                                    app.status_msg =
+                                        Some(("Tags saved".to_string(), Instant::now()));
                                     app.apply_filter();
                                 }
                                 Err(e) => {
-                                    app.status_msg = Some((format!("Tag save failed: {e}"), Instant::now()));
+                                    app.status_msg =
+                                        Some((format!("Tag save failed: {e}"), Instant::now()));
                                 }
                             }
                         }
@@ -836,7 +935,8 @@ async fn run_event_loop(
                                 app.mode = AppMode::Library;
                             }
                             Err(e) => {
-                                app.status_msg = Some((format!("Library load failed: {e}"), Instant::now()));
+                                app.status_msg =
+                                    Some((format!("Library load failed: {e}"), Instant::now()));
                             }
                         }
                     }
@@ -904,8 +1004,14 @@ async fn run_event_loop(
                             .map(|e| e.session_id.clone());
                         if let Some(id) = target_id {
                             // Try to find in active list
-                            let active_pos = app.filtered_active.iter().position(|&i| app.sessions[i].session_id == id);
-                            let archived_pos = app.filtered_archived.iter().position(|&i| app.sessions[i].session_id == id);
+                            let active_pos = app
+                                .filtered_active
+                                .iter()
+                                .position(|&i| app.sessions[i].session_id == id);
+                            let archived_pos = app
+                                .filtered_archived
+                                .iter()
+                                .position(|&i| app.sessions[i].session_id == id);
                             if let Some(pos) = active_pos {
                                 app.list_state_active.select(Some(pos));
                                 app.focus = Focus::ActiveList;
@@ -921,7 +1027,11 @@ async fn run_event_loop(
                                 app.library_entries.clear();
                                 app.library_filtered.clear();
                             } else {
-                                app.status_msg = Some(("Session not in current view — Esc then 0 to unfilter".to_string(), Instant::now()));
+                                app.status_msg = Some((
+                                    "Session not in current view — Esc then 0 to unfilter"
+                                        .to_string(),
+                                    Instant::now(),
+                                ));
                             }
                         }
                     }
@@ -1008,8 +1118,7 @@ async fn run_event_loop(
                     }
 
                     // --- Normal navigation ---
-                    (AppMode::Normal, _, KeyCode::Tab)
-                    | (AppMode::Grep, _, KeyCode::Tab) => {
+                    (AppMode::Normal, _, KeyCode::Tab) | (AppMode::Grep, _, KeyCode::Tab) => {
                         app.focus = match app.focus {
                             Focus::ActiveList => Focus::ArchivedList,
                             Focus::ArchivedList => Focus::Preview,
@@ -1028,7 +1137,9 @@ async fn run_event_loop(
                             if n > 0 {
                                 let i = app.list_state_active.selected().unwrap_or(0);
                                 let next = (i + 1).min(n - 1);
-                                if next != i { app.preview_scroll = 0; }
+                                if next != i {
+                                    app.preview_scroll = 0;
+                                }
                                 app.list_state_active.select(Some(next));
                             }
                         } else {
@@ -1036,7 +1147,9 @@ async fn run_event_loop(
                             if n > 0 {
                                 let i = app.list_state_archived.selected().unwrap_or(0);
                                 let next = (i + 1).min(n - 1);
-                                if next != i { app.preview_scroll = 0; }
+                                if next != i {
+                                    app.preview_scroll = 0;
+                                }
                                 app.list_state_archived.select(Some(next));
                             }
                         }
@@ -1050,12 +1163,16 @@ async fn run_event_loop(
                         } else if app.focus == Focus::ActiveList {
                             let i = app.list_state_active.selected().unwrap_or(0);
                             let prev = i.saturating_sub(1);
-                            if prev != i { app.preview_scroll = 0; }
+                            if prev != i {
+                                app.preview_scroll = 0;
+                            }
                             app.list_state_active.select(Some(prev));
                         } else {
                             let i = app.list_state_archived.selected().unwrap_or(0);
                             let prev = i.saturating_sub(1);
-                            if prev != i { app.preview_scroll = 0; }
+                            if prev != i {
+                                app.preview_scroll = 0;
+                            }
                             app.list_state_archived.select(Some(prev));
                         }
                     }
@@ -1070,30 +1187,44 @@ async fn run_event_loop(
                     (AppMode::Normal, KeyModifiers::CONTROL, KeyCode::Char('r'))
                     | (AppMode::Grep, KeyModifiers::CONTROL, KeyCode::Char('r')) => {
                         if let Some(s) = app.selected_session() {
-                            let id           = s.session_id.clone();
-                            let jsonl        = s.jsonl_path.clone();
-                            let source       = s.source.clone();
-                            let session      = s.clone();
-                            let summaries    = app.summaries.clone();
+                            let id = s.session_id.clone();
+                            let jsonl = s.jsonl_path.clone();
+                            let source = s.source.clone();
+                            let session = s.clone();
+                            let summaries = app.summaries.clone();
                             let generated_at = app.summary_generated_at.clone();
-                            let generating   = app.generating.clone();
-                            let db           = app.db.clone();
+                            let generating = app.generating.clone();
+                            let db = app.db.clone();
                             let obsidian_path = app.settings.obsidian_kb_path.clone();
 
                             // Load existing learnings before clearing cache
                             let existing_learnings = crate::store::load_learnings(
                                 &app.db.lock().unwrap_or_else(|e| e.into_inner()),
                                 &id,
-                            ).unwrap_or_default();
+                            )
+                            .unwrap_or_default();
 
                             // Clear cached summary (learning rows in DB are kept)
-                            app.summaries.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
-                            app.summary_generated_at.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+                            app.summaries
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .remove(&id);
+                            app.summary_generated_at
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .remove(&id);
 
                             spawn_summary_generation(
-                                id, jsonl, source, session,
-                                existing_learnings, obsidian_path,
-                                summaries, generated_at, generating, db,
+                                id,
+                                jsonl,
+                                source,
+                                session,
+                                existing_learnings,
+                                obsidian_path,
+                                summaries,
+                                generated_at,
+                                generating,
+                                db,
                             );
                         }
                     }
@@ -1116,11 +1247,10 @@ async fn run_event_loop(
                         app.apply_filter();
                     }
 
-                    (AppMode::Normal, _, KeyCode::Enter)
-                    | (AppMode::Grep, _, KeyCode::Enter) => {
+                    (AppMode::Normal, _, KeyCode::Enter) | (AppMode::Grep, _, KeyCode::Enter) => {
                         if let Some(s) = app.selected_session() {
-                            let path  = s.project_path.clone();
-                            let id    = s.session_id.clone();
+                            let path = s.project_path.clone();
+                            let id = s.session_id.clone();
                             let title = window_title_from_session(s);
                             let result = match s.source {
                                 SessionSource::ClaudeCode => {
@@ -1133,12 +1263,17 @@ async fn run_event_loop(
                                 }
                                 SessionSource::Copilot => {
                                     let name = crate::tmux::copilot_session_name(&path);
-                                    crate::tmux::resume_copilot_in_tmux(&name, &path, &id, false, &title)
+                                    crate::tmux::resume_copilot_in_tmux(
+                                        &name, &path, &id, false, &title,
+                                    )
                                 }
                             };
                             match result {
                                 Ok(()) => return Ok(()),
-                                Err(e) => app.status_msg = Some((format!("Resume failed: {e}"), Instant::now())),
+                                Err(e) => {
+                                    app.status_msg =
+                                        Some((format!("Resume failed: {e}"), Instant::now()))
+                                }
                             }
                         }
                     }
@@ -1148,8 +1283,8 @@ async fn run_event_loop(
                     (AppMode::Normal, KeyModifiers::CONTROL, KeyCode::Char('y'))
                     | (AppMode::Grep, KeyModifiers::CONTROL, KeyCode::Char('y')) => {
                         if let Some(s) = app.selected_session() {
-                            let path  = s.project_path.clone();
-                            let id    = s.session_id.clone();
+                            let path = s.project_path.clone();
+                            let id = s.session_id.clone();
                             let title = window_title_from_session(s);
                             let result = match s.source {
                                 SessionSource::ClaudeCode => {
@@ -1163,12 +1298,17 @@ async fn run_event_loop(
                                 }
                                 SessionSource::Copilot => {
                                     let name = crate::tmux::copilot_session_name(&path);
-                                    crate::tmux::resume_copilot_in_tmux(&name, &path, &id, true, &title)
+                                    crate::tmux::resume_copilot_in_tmux(
+                                        &name, &path, &id, true, &title,
+                                    )
                                 }
                             };
                             match result {
                                 Ok(()) => return Ok(()),
-                                Err(e) => app.status_msg = Some((format!("Resume failed: {e}"), Instant::now())),
+                                Err(e) => {
+                                    app.status_msg =
+                                        Some((format!("Resume failed: {e}"), Instant::now()))
+                                }
                             }
                         }
                     }
@@ -1183,7 +1323,7 @@ async fn run_event_loop(
                     (AppMode::Normal, KeyModifiers::NONE, KeyCode::Char('c')) => {
                         let content = build_preview_content(app);
                         let msg = match copy_to_clipboard(&content) {
-                            Ok(_)  => "Copied to clipboard".to_string(),
+                            Ok(_) => "Copied to clipboard".to_string(),
                             Err(e) => format!("Copy failed: {}", e),
                         };
                         app.status_msg = Some((msg, Instant::now()));
@@ -1213,7 +1353,11 @@ async fn run_event_loop(
                                 now_archived,
                             );
                             app.apply_filter();
-                            let msg = if now_archived { "Archived" } else { "Unarchived" };
+                            let msg = if now_archived {
+                                "Archived"
+                            } else {
+                                "Unarchived"
+                            };
                             app.status_msg = Some((msg.to_string(), Instant::now()));
                         }
                     }
@@ -1246,7 +1390,7 @@ async fn run_event_loop(
                     (AppMode::ActionMenu, _, KeyCode::Char(k @ ('n' | 'N'))) => {
                         let yolo = k == 'N';
                         if let Some(s) = app.selected_session() {
-                            let path  = s.project_path.clone();
+                            let path = s.project_path.clone();
                             let title = format!("new:{}", crate::util::path_last_n(&path, 1));
                             let result = match s.source {
                                 SessionSource::ClaudeCode => {
@@ -1259,12 +1403,17 @@ async fn run_event_loop(
                                 }
                                 SessionSource::Copilot => {
                                     let name = crate::tmux::new_copilot_session_name(&path);
-                                    crate::tmux::new_copilot_in_tmux(&name, &path, yolo, &title, None)
+                                    crate::tmux::new_copilot_in_tmux(
+                                        &name, &path, yolo, &title, None,
+                                    )
                                 }
                             };
                             match result {
                                 Ok(()) => return Ok(()),
-                                Err(e) => app.status_msg = Some((format!("Launch failed: {e}"), Instant::now())),
+                                Err(e) => {
+                                    app.status_msg =
+                                        Some((format!("Launch failed: {e}"), Instant::now()))
+                                }
                             }
                         }
                         app.mode = AppMode::Normal;
@@ -1292,7 +1441,10 @@ async fn run_event_loop(
                             )
                         };
                         let Some(combined) = combined else {
-                            app.status_msg = Some(("No summary available — press Ctrl+R to generate first".to_string(), Instant::now()));
+                            app.status_msg = Some((
+                                "No summary available — press Ctrl+R to generate first".to_string(),
+                                Instant::now(),
+                            ));
                             app.mode = AppMode::Normal;
                             continue;
                         };
@@ -1300,7 +1452,13 @@ async fn run_event_loop(
                         let result = match source {
                             SessionSource::ClaudeCode => {
                                 let name = crate::tmux::new_cc_session_name(&path);
-                                crate::tmux::new_cc_in_tmux(&name, &path, yolo, &title, Some(&context))
+                                crate::tmux::new_cc_in_tmux(
+                                    &name,
+                                    &path,
+                                    yolo,
+                                    &title,
+                                    Some(&context),
+                                )
                             }
                             SessionSource::OpenCode => {
                                 let name = crate::tmux::new_oc_session_name(&path);
@@ -1308,12 +1466,21 @@ async fn run_event_loop(
                             }
                             SessionSource::Copilot => {
                                 let name = crate::tmux::new_copilot_session_name(&path);
-                                crate::tmux::new_copilot_in_tmux(&name, &path, yolo, &title, Some(&context))
+                                crate::tmux::new_copilot_in_tmux(
+                                    &name,
+                                    &path,
+                                    yolo,
+                                    &title,
+                                    Some(&context),
+                                )
                             }
                         };
                         match result {
                             Ok(()) => return Ok(()),
-                            Err(e) => app.status_msg = Some((format!("Launch failed: {e}"), Instant::now())),
+                            Err(e) => {
+                                app.status_msg =
+                                    Some((format!("Launch failed: {e}"), Instant::now()))
+                            }
                         }
                         app.mode = AppMode::Normal;
                     }
@@ -1328,9 +1495,8 @@ async fn run_event_loop(
 
                     // --- Settings panel ---
                     (AppMode::Normal, KeyModifiers::NONE, KeyCode::Char('s')) => {
-                        app.settings_input = app.settings.obsidian_kb_path
-                            .clone()
-                            .unwrap_or_default();
+                        app.settings_input =
+                            app.settings.obsidian_kb_path.clone().unwrap_or_default();
                         app.settings_error = None;
                         app.settings_editing = false;
                         app.mode = AppMode::Settings;
@@ -1358,7 +1524,8 @@ async fn run_event_loop(
                                     app.settings.obsidian_kb_path = Some(path);
                                     app.settings_editing = false;
                                     app.settings_error = None;
-                                    app.status_msg = Some(("Obsidian path saved".to_string(), Instant::now()));
+                                    app.status_msg =
+                                        Some(("Obsidian path saved".to_string(), Instant::now()));
                                     app.mode = AppMode::Normal;
                                 }
                                 Err(e) => {
@@ -1396,46 +1563,64 @@ fn spawn_summary_generation(
     generating: Arc<Mutex<std::collections::HashSet<String>>>,
     db: Arc<Mutex<rusqlite::Connection>>,
 ) {
-    generating.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone());
+    generating
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(id.clone());
     tokio::spawn(async move {
         let msgs = match source {
             SessionSource::ClaudeCode => {
                 let Some(jsonl_path) = jsonl else {
-                    generating.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+                    generating
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&id);
                     return;
                 };
                 tokio::task::spawn_blocking({
                     let p = jsonl_path.clone();
                     move || crate::sessions::parse_messages(std::path::Path::new(&p))
-                }).await.ok().and_then(|r| r.ok())
+                })
+                .await
+                .ok()
+                .and_then(|r| r.ok())
             }
             SessionSource::OpenCode => {
                 let session_id = id.clone();
                 tokio::task::spawn_blocking(move || {
                     crate::opencode_sessions::parse_opencode_messages(&session_id)
-                }).await.ok().and_then(|r| r.ok())
+                })
+                .await
+                .ok()
+                .and_then(|r| r.ok())
             }
             SessionSource::Copilot => {
                 let session_id = id.clone();
                 tokio::task::spawn_blocking(move || {
                     crate::copilot_sessions::parse_copilot_messages(&session_id)
-                }).await.ok().and_then(|r| r.ok())
+                })
+                .await
+                .ok()
+                .and_then(|r| r.ok())
             }
         };
 
         if let Some(msgs) = msgs {
             let src_str = match source {
                 SessionSource::ClaudeCode => "cc",
-                SessionSource::OpenCode   => "oc",
-                SessionSource::Copilot    => "co",
+                SessionSource::OpenCode => "oc",
+                SessionSource::Copilot => "co",
             };
             match crate::summary::generate_summary(&msgs, &existing_learnings).await {
                 Ok((factual, new_points)) => {
                     // 1. Persist factual summary (overwrites existing)
                     let ts = crate::store::save_summary(
                         &db.lock().unwrap_or_else(|e| e.into_inner()),
-                        &id, src_str, &factual,
-                    ).unwrap_or_else(|_| {
+                        &id,
+                        src_str,
+                        &factual,
+                    )
+                    .unwrap_or_else(|_| {
                         std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
@@ -1446,7 +1631,8 @@ fn spawn_summary_generation(
                     if !new_points.is_empty() {
                         let _ = crate::store::save_learnings(
                             &db.lock().unwrap_or_else(|e| e.into_inner()),
-                            &id, &new_points,
+                            &id,
+                            &new_points,
                         );
                     }
 
@@ -1454,24 +1640,46 @@ fn spawn_summary_generation(
                     let all_learnings = crate::store::load_learnings(
                         &db.lock().unwrap_or_else(|e| e.into_inner()),
                         &id,
-                    ).unwrap_or_default();
+                    )
+                    .unwrap_or_default();
 
                     // 4. Build combined display string (factual + all learnings)
                     let combined = crate::summary::build_combined_display(&factual, &all_learnings);
 
                     // 5. Update in-memory cache with combined display
-                    summaries.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), combined);
-                    summary_generated_at.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), ts);
+                    summaries
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(id.clone(), combined);
+                    summary_generated_at
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(id.clone(), ts);
 
                     // 6. Export to Obsidian (non-fatal — failure only logs, never blocks display)
                     if let Some(ref vault_path) = obsidian_path {
-                        if crate::obsidian::export_to_obsidian(
-                            &session, &factual, &all_learnings, vault_path,
-                        ).is_ok() {
+                        let exported = crate::obsidian::export_to_obsidian(
+                            &session,
+                            &factual,
+                            &all_learnings,
+                            vault_path,
+                        );
+                        if exported.is_ok() {
                             let _ = crate::store::mark_obsidian_synced(
                                 &db.lock().unwrap_or_else(|e| e.into_inner()),
                                 &id,
                             );
+                            // Snapshot settings now (we're outside the TUI, so we can't
+                            // borrow AppState). Read fresh from the DB.
+                            let settings_snapshot = {
+                                let conn = db.lock().unwrap_or_else(|e| e.into_inner());
+                                crate::settings::load(&conn)
+                            };
+                            if let Err(e) =
+                                push_session_to_daily(&session, &factual, &settings_snapshot)
+                            {
+                                eprintln!("cc-speedy: daily push failed: {}", e);
+                            }
                         }
                     }
                 }
@@ -1483,7 +1691,10 @@ fn spawn_summary_generation(
                 }
             }
         }
-        generating.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+        generating
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&id);
     });
 }
 
@@ -1499,14 +1710,25 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
     let jobs: Vec<String> = {
         let gen = app.generating.lock().unwrap_or_else(|e| e.into_inner());
         let sum = app.summaries.lock().unwrap_or_else(|e| e.into_inner());
-        let mut items: Vec<String> = gen.iter().map(|id| {
-            let label = app.sessions.iter()
-                .find(|s| &s.session_id == id)
-                .map(|s| if !s.summary.is_empty() { s.summary.clone() } else { s.project_name.clone() })
-                .unwrap_or_else(|| id[..8.min(id.len())].to_string());
-            let status = sum.get(id).map(|v| v.as_str()).unwrap_or("waiting...");
-            format!("⟳  {} — {}", label, status)
-        }).collect();
+        let mut items: Vec<String> = gen
+            .iter()
+            .map(|id| {
+                let label = app
+                    .sessions
+                    .iter()
+                    .find(|s| &s.session_id == id)
+                    .map(|s| {
+                        if !s.summary.is_empty() {
+                            s.summary.clone()
+                        } else {
+                            s.project_name.clone()
+                        }
+                    })
+                    .unwrap_or_else(|| id[..8.min(id.len())].to_string());
+                let status = sum.get(id).map(|v| v.as_str()).unwrap_or("waiting...");
+                format!("⟳  {} — {}", label, status)
+            })
+            .collect();
         if items.len() > MAX_JOB_LINES {
             let extra = items.len() - MAX_JOB_LINES;
             items.truncate(MAX_JOB_LINES);
@@ -1514,7 +1736,11 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
         }
         items
     };
-    let jobs_height = if jobs.is_empty() { 0 } else { (jobs.len() + 2) as u16 };
+    let jobs_height = if jobs.is_empty() {
+        0
+    } else {
+        (jobs.len() + 2) as u16
+    };
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -1532,11 +1758,19 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
         AppMode::Grep => {
             let n = app.filtered_active.len() + app.filtered_archived.len();
             (
-                format!("grep: {}|  ({} match{})", app.grep_query, n, if n == 1 { "" } else { "es" }),
+                format!(
+                    "grep: {}|  ({} match{})",
+                    app.grep_query,
+                    n,
+                    if n == 1 { "" } else { "es" }
+                ),
                 " Grep  [Esc: exit] ",
             )
         }
-        AppMode::Rename => (format!("rename: {}|", app.rename_input), " Rename  [Enter: confirm  Esc: cancel] "),
+        AppMode::Rename => (
+            format!("rename: {}|", app.rename_input),
+            " Rename  [Enter: confirm  Esc: cancel] ",
+        ),
         AppMode::ActionMenu => ("".to_string(), " cc-speedy "),
         AppMode::Settings => ("".to_string(), " cc-speedy — Settings "),
         AppMode::Library => {
@@ -1565,8 +1799,12 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
             };
             let n = app.projects_filtered.len();
             (
-                format!("  sort: {}  ·  {} project{}  (/: filter  s: sort  Enter: drill  Esc: exit)",
-                        sort_label, n, if n == 1 { "" } else { "s" }),
+                format!(
+                    "  sort: {}  ·  {} project{}  (/: filter  s: sort  Enter: drill  Esc: exit)",
+                    sort_label,
+                    n,
+                    if n == 1 { "" } else { "s" }
+                ),
                 " Project Dashboard ",
             )
         }
@@ -1597,7 +1835,10 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
         AppMode::Help => ("".to_string(), " cc-speedy — Help "),
         AppMode::Normal => {
             let hint = if let Some(ref pp) = app.project_filter {
-                format!("  project: {}  (Esc to clear)", crate::util::path_last_n(pp, 2))
+                format!(
+                    "  project: {}  (Esc to clear)",
+                    crate::util::path_last_n(pp, 2)
+                )
             } else if app.filter.is_empty() {
                 "  (F1: help  /: filter  ?: grep  L: library  P: projects)".to_string()
             } else {
@@ -1606,14 +1847,13 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
             (hint, " cc-speedy ")
         }
     };
-    let filter_block = Paragraph::new(bar_text)
-        .block(
-            Block::default()
-                .border_type(theme::BORDER_TYPE)
-                .borders(Borders::ALL)
-                .border_style(theme::panel_block_style(theme::BORDER_TOP))
-                .title(Span::styled(bar_title, theme::title_style())),
-        );
+    let filter_block = Paragraph::new(bar_text).block(
+        Block::default()
+            .border_type(theme::BORDER_TYPE)
+            .borders(Borders::ALL)
+            .border_style(theme::panel_block_style(theme::BORDER_TOP))
+            .title(Span::styled(bar_title, theme::title_style())),
+    );
     f.render_widget(filter_block, chunks[0]);
 
     // Library / Projects modes take over the main content area full-width.
@@ -1626,70 +1866,74 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
     } else if app.mode == AppMode::Digest {
         draw_digest(f, app, chunks[1]);
     } else {
+        // Main panes: left panel (split active/archived) and right preview
+        let panes = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+            .split(chunks[1]);
 
-    // Main panes: left panel (split active/archived) and right preview
-    let panes = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
-        .split(chunks[1]);
+        // Split left pane vertically: active sessions on top, archived below
+        let archived_count = app.filtered_archived.len();
+        let archived_height = if archived_count > 0 { 10 } else { 0 };
+        let archived_height_constraint = if archived_count > 0 {
+            Constraint::Length(archived_height as u16)
+        } else {
+            Constraint::Min(0)
+        };
 
-    // Split left pane vertically: active sessions on top, archived below
-    let archived_count = app.filtered_archived.len();
-    let archived_height = if archived_count > 0 { 10 } else { 0 };
-    let archived_height_constraint = if archived_count > 0 {
-        Constraint::Length(archived_height as u16)
-    } else {
-        Constraint::Min(0)
-    };
+        let list_panes = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0), archived_height_constraint])
+            .split(panes[0]);
 
-    let list_panes = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(0),
-            archived_height_constraint,
-        ])
-        .split(panes[0]);
+        // Clone the git cache once per frame so the two draw_list calls can each
+        // pass a &HashMap without holding the mutex across both (would deadlock
+        // with the background git-status writers).
+        let git_cache = app
+            .git_status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let generating_set = app
+            .generating
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
 
-    // Clone the git cache once per frame so the two draw_list calls can each
-    // pass a &HashMap without holding the mutex across both (would deadlock
-    // with the background git-status writers).
-    let git_cache = app.git_status.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    let generating_set = app.generating.lock().unwrap_or_else(|e| e.into_inner()).clone();
-
-    draw_list(
-        f,
-        list_panes[0],
-        &app.sessions,
-        &app.pinned,
-        &app.has_learnings,
-        &app.obsidian_synced,
-        &git_cache,
-        &generating_set,
-        &app.filtered_active,
-        &mut app.list_state_active,
-        "Sessions",
-        Focus::ActiveList,
-        app.focus,
-    );
-    if archived_count > 0 {
         draw_list(
             f,
-            list_panes[1],
+            list_panes[0],
             &app.sessions,
             &app.pinned,
             &app.has_learnings,
             &app.obsidian_synced,
             &git_cache,
             &generating_set,
-            &app.filtered_archived,
-            &mut app.list_state_archived,
-            "Archived",
-            Focus::ArchivedList,
+            &app.filtered_active,
+            &mut app.list_state_active,
+            "Sessions",
+            Focus::ActiveList,
             app.focus,
         );
-    }
+        if archived_count > 0 {
+            draw_list(
+                f,
+                list_panes[1],
+                &app.sessions,
+                &app.pinned,
+                &app.has_learnings,
+                &app.obsidian_synced,
+                &git_cache,
+                &generating_set,
+                &app.filtered_archived,
+                &mut app.list_state_archived,
+                "Archived",
+                Focus::ArchivedList,
+                app.focus,
+            );
+        }
 
-    draw_preview(f, app, panes[1], app.preview_scroll);
+        draw_preview(f, app, panes[1], app.preview_scroll);
     } // end of non-library branch
 
     // Background jobs panel
@@ -1725,7 +1969,10 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
         .direction(Direction::Horizontal)
         .constraints([Constraint::Min(0), Constraint::Length(version_w)])
         .split(chunks[3]);
-    f.render_widget(Paragraph::new(status_text).style(status_style), footer_chunks[0]);
+    f.render_widget(
+        Paragraph::new(status_text).style(status_style),
+        footer_chunks[0],
+    );
     f.render_widget(
         Paragraph::new(version_text)
             .style(Style::default().fg(theme::STATUS_HELP))
@@ -1769,19 +2016,29 @@ fn draw_link_picker(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
                 SessionSource::OpenCode => ("[OC]", theme::OC_BADGE),
                 SessionSource::Copilot => ("[CO]", theme::CO_BADGE),
             };
-            let title = if !s.summary.is_empty() { truncate(&s.summary, 40) } else { s.project_name.clone() };
+            let title = if !s.summary.is_empty() {
+                truncate(&s.summary, 40)
+            } else {
+                s.project_name.clone()
+            };
             Line::from(vec![
                 Span::styled(format!("{} ", format_time(s.modified)), theme::dim_style()),
                 Span::styled(format!("{} ", badge_text), Style::default().fg(badge_color)),
                 Span::styled(title, Style::default().fg(theme::FG)),
-                Span::styled(format!("   {}", crate::util::path_last_n(&s.project_path, 2)), theme::dim_style()),
+                Span::styled(
+                    format!("   {}", crate::util::path_last_n(&s.project_path, 2)),
+                    theme::dim_style(),
+                ),
             ])
         })
         .map(ListItem::new)
         .collect();
 
-    let title = format!(" Link — Pick Parent  ({} candidate{}) ",
-        items.len(), if items.len() == 1 { "" } else { "s" });
+    let title = format!(
+        " Link — Pick Parent  ({} candidate{}) ",
+        items.len(),
+        if items.len() == 1 { "" } else { "s" }
+    );
     let list = List::new(items)
         .block(
             Block::default()
@@ -1791,7 +2048,10 @@ fn draw_link_picker(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
                 .title(Span::styled(title, theme::title_style())),
         )
         .highlight_style(
-            Style::default().bg(theme::SEL_BG).fg(theme::SEL_FG).add_modifier(ratatui::style::Modifier::BOLD),
+            Style::default()
+                .bg(theme::SEL_BG)
+                .fg(theme::SEL_FG)
+                .add_modifier(ratatui::style::Modifier::BOLD),
         );
     f.render_stateful_widget(list, area, &mut app.link_picker_list_state);
 }
@@ -1800,7 +2060,11 @@ fn draw_projects(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
     use crate::git_status::GitStatus;
     use ratatui::style::Color;
 
-    let git_cache = app.git_status.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let git_cache = app
+        .git_status
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
 
     let items: Vec<ListItem> = app
         .projects_filtered
@@ -1825,10 +2089,19 @@ fn draw_projects(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
             };
             Line::from(vec![
                 Span::styled(format!("{} ", glyph), Style::default().fg(gcolor)),
-                Span::styled(format!("{:<20} ", truncate(&branch_str, 20)), theme::dim_style()),
-                Span::styled(format!("{:<28}", truncate(&p.name, 28)), Style::default().fg(theme::FG)),
+                Span::styled(
+                    format!("{:<20} ", truncate(&branch_str, 20)),
+                    theme::dim_style(),
+                ),
+                Span::styled(
+                    format!("{:<28}", truncate(&p.name, 28)),
+                    Style::default().fg(theme::FG),
+                ),
                 Span::styled(format!("{:>4} ", p.session_count), theme::dim_style()),
-                Span::styled(format!("last: {}", format_time(p.last_active)), theme::dim_style()),
+                Span::styled(
+                    format!("last: {}", format_time(p.last_active)),
+                    theme::dim_style(),
+                ),
                 Span::styled(pin_str, theme::pin_style()),
             ])
         })
@@ -1849,7 +2122,10 @@ fn draw_projects(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
                 .title(Span::styled(title, theme::title_style())),
         )
         .highlight_style(
-            Style::default().bg(theme::SEL_BG).fg(theme::SEL_FG).add_modifier(ratatui::style::Modifier::BOLD),
+            Style::default()
+                .bg(theme::SEL_BG)
+                .fg(theme::SEL_FG)
+                .add_modifier(ratatui::style::Modifier::BOLD),
         );
 
     f.render_stateful_widget(list, area, &mut app.projects_list_state);
@@ -1863,7 +2139,11 @@ fn draw_library(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
         .sessions
         .iter()
         .map(|s| {
-            let title = if !s.summary.is_empty() { s.summary.as_str() } else { s.project_name.as_str() };
+            let title = if !s.summary.is_empty() {
+                s.summary.as_str()
+            } else {
+                s.project_name.as_str()
+            };
             (s.session_id.as_str(), (title, s.modified))
         })
         .collect();
@@ -1874,10 +2154,10 @@ fn draw_library(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
         .filter_map(|&ei| app.library_entries.get(ei))
         .map(|e| {
             let (cat_label, cat_color) = match e.category.as_str() {
-                "decision_points" => ("DEC", Color::Rgb(30, 144, 255)),      // blue
-                "lessons_gotchas" => ("LSN", Color::Rgb(212, 160, 23)),      // amber
-                "tools_commands"  => ("TOL", Color::Rgb(13, 131, 0)),        // green
-                _                 => ("???", theme::FG_DIM),
+                "decision_points" => ("DEC", Color::Rgb(30, 144, 255)), // blue
+                "lessons_gotchas" => ("LSN", Color::Rgb(212, 160, 23)), // amber
+                "tools_commands" => ("TOL", Color::Rgb(13, 131, 0)),    // green
+                _ => ("???", theme::FG_DIM),
             };
             let (stitle, smodified) = session_map
                 .get(e.session_id.as_str())
@@ -1910,7 +2190,10 @@ fn draw_library(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
                 .title(Span::styled(title, theme::title_style())),
         )
         .highlight_style(
-            Style::default().bg(theme::SEL_BG).fg(theme::SEL_FG).add_modifier(ratatui::style::Modifier::BOLD),
+            Style::default()
+                .bg(theme::SEL_BG)
+                .fg(theme::SEL_FG)
+                .add_modifier(ratatui::style::Modifier::BOLD),
         );
 
     f.render_stateful_widget(list, area, &mut app.library_list_state);
@@ -1945,8 +2228,8 @@ fn draw_list(
             };
             let (badge_text, badge_color) = match s.source {
                 SessionSource::ClaudeCode => ("[CC]", theme::CC_BADGE),
-                SessionSource::OpenCode   => ("[OC]", theme::OC_BADGE),
-                SessionSource::Copilot    => ("[CO]", theme::CO_BADGE),
+                SessionSource::OpenCode => ("[OC]", theme::OC_BADGE),
+                SessionSource::Copilot => ("[CO]", theme::CO_BADGE),
             };
             let pin_span = if generating.contains(&s.session_id) {
                 Span::styled(format!("{} ", spinner), Style::default().fg(theme::JOBS_FG))
@@ -1983,7 +2266,11 @@ fn draw_list(
 
     let count = items.len();
     let is_focused = current_focus == focus;
-    let border_color = if is_focused { theme::BORDER_FOCUSED } else { theme::BORDER_LIST };
+    let border_color = if is_focused {
+        theme::BORDER_FOCUSED
+    } else {
+        theme::BORDER_LIST
+    };
     let list = List::new(items)
         .block(
             Block::default()
@@ -2032,9 +2319,15 @@ fn build_preview_content(app: &AppState) -> String {
 
             let branch_line = {
                 use crate::git_status::GitStatus;
-                let live = app.git_status.lock().unwrap_or_else(|e| e.into_inner()).get(&s.project_path).map(|(g, _)| g.clone());
+                let live = app
+                    .git_status
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&s.project_path)
+                    .map(|(g, _)| g.clone());
                 match live {
-                    Some(GitStatus::Clean { ref branch }) | Some(GitStatus::Dirty { ref branch }) => {
+                    Some(GitStatus::Clean { ref branch })
+                    | Some(GitStatus::Dirty { ref branch }) => {
                         let dirty = matches!(live, Some(GitStatus::Dirty { .. }));
                         let ran_on = if !s.git_branch.is_empty() && s.git_branch != *branch {
                             format!("  (ran on {})", s.git_branch)
@@ -2064,8 +2357,17 @@ fn build_preview_content(app: &AppState) -> String {
                         SessionSource::OpenCode => "[OC]",
                         SessionSource::Copilot => "[CO]",
                     };
-                    let title = if !p.summary.is_empty() { truncate(&p.summary, 40) } else { p.project_name.clone() };
-                    format!("\nPARENT:   {} {} {}", format_time(p.modified), badge, title)
+                    let title = if !p.summary.is_empty() {
+                        truncate(&p.summary, 40)
+                    } else {
+                        p.project_name.clone()
+                    };
+                    format!(
+                        "\nPARENT:   {} {} {}",
+                        format_time(p.modified),
+                        badge,
+                        title
+                    )
                 })
                 .unwrap_or_default();
 
@@ -2088,8 +2390,20 @@ fn build_preview_content(app: &AppState) -> String {
                                 SessionSource::OpenCode => "[OC]",
                                 SessionSource::Copilot => "[CO]",
                             };
-                            let title = if !c.summary.is_empty() { truncate(&c.summary, 40) } else { c.project_name.clone() };
-                            (c.modified, format!("          {} {} {}", format_time(c.modified), badge, title))
+                            let title = if !c.summary.is_empty() {
+                                truncate(&c.summary, 40)
+                            } else {
+                                c.project_name.clone()
+                            };
+                            (
+                                c.modified,
+                                format!(
+                                    "          {} {} {}",
+                                    format_time(c.modified),
+                                    badge,
+                                    title
+                                ),
+                            )
                         })
                         .collect::<Vec<_>>()
                         .into_iter()
@@ -2108,11 +2422,13 @@ fn build_preview_content(app: &AppState) -> String {
             };
 
             let generated_line = {
-                let gat = app.summary_generated_at.lock().unwrap_or_else(|e| e.into_inner());
+                let gat = app
+                    .summary_generated_at
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
                 match gat.get(&s.session_id) {
                     Some(&ts) => {
-                        let t = std::time::UNIX_EPOCH
-                            + std::time::Duration::from_secs(ts as u64);
+                        let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(ts as u64);
                         format!("\n\n─── generated {} ───", format_time(t))
                     }
                     None => String::new(),
@@ -2162,17 +2478,28 @@ fn draw_preview(f: &mut ratatui::Frame, app: &mut AppState, area: Rect, scroll: 
     let lines: Vec<Line> = if grep_q_lc.is_empty() {
         content.lines().map(|l| Line::from(l.to_string())).collect()
     } else {
-        content.lines().map(|l| highlight_line(l, &grep_q_lc)).collect()
+        content
+            .lines()
+            .map(|l| highlight_line(l, &grep_q_lc))
+            .collect()
     };
 
     let focused = app.focus == Focus::Preview;
-    let border_color = if focused { theme::BORDER_FOCUSED } else { theme::BORDER_PREVIEW };
+    let border_color = if focused {
+        theme::BORDER_FOCUSED
+    } else {
+        theme::BORDER_PREVIEW
+    };
     let block = Block::default()
         .border_type(theme::BORDER_TYPE)
         .borders(Borders::ALL)
         .border_style(theme::panel_block_style(border_color))
         .title(Span::styled(
-            if focused { " Summary  [Tab: back to list] " } else { " Summary  [Tab: scroll] " },
+            if focused {
+                " Summary  [Tab: back to list] "
+            } else {
+                " Summary  [Tab: scroll] "
+            },
             theme::title_style(),
         ));
     let preview = Paragraph::new(lines)
@@ -2194,9 +2521,9 @@ fn git_status_span(
     let (glyph, color) = match git_cache.get(path).map(|(s, _)| s) {
         Some(GitStatus::Dirty { .. }) => ("●", Color::Red),
         Some(GitStatus::Clean { .. }) => ("○", Color::Green),
-        Some(GitStatus::NoGit)        => ("·", theme::FG_DIM),
-        Some(GitStatus::Error)        => ("◦", Color::Yellow),
-        None                          => (" ", theme::FG_DIM),
+        Some(GitStatus::NoGit) => ("·", theme::FG_DIM),
+        Some(GitStatus::Error) => ("◦", Color::Yellow),
+        None => (" ", theme::FG_DIM),
     };
     Span::styled(format!("{} ", glyph), Style::default().fg(color))
 }
@@ -2220,7 +2547,10 @@ pub fn highlight_line(line: &str, query_lc: &str) -> Line<'static> {
             spans.push(Span::raw(line[cursor..abs].to_string()));
         }
         let end = abs + query_lc.len();
-        spans.push(Span::styled(line[abs..end].to_string(), theme::grep_match_style()));
+        spans.push(Span::styled(
+            line[abs..end].to_string(),
+            theme::grep_match_style(),
+        ));
         cursor = end;
     }
     if cursor < line.len() {
@@ -2239,18 +2569,22 @@ fn draw_pin_popup(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
     let popup_area = centered_rect(56, 11, area);
     f.render_widget(Clear, popup_area);
 
-    let (session_name, is_pinned, has_summary) = app.selected_session().map(|s| {
-        let name = if !s.summary.is_empty() {
-            truncate(&s.summary, 44)
-        } else {
-            truncate(&s.project_name, 44)
-        };
-        let has = app.summaries
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .contains_key(&s.session_id);
-        (name, app.pinned.contains(&s.session_id), has)
-    }).unwrap_or_default();
+    let (session_name, is_pinned, has_summary) = app
+        .selected_session()
+        .map(|s| {
+            let name = if !s.summary.is_empty() {
+                truncate(&s.summary, 44)
+            } else {
+                truncate(&s.project_name, 44)
+            };
+            let has = app
+                .summaries
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(&s.session_id);
+            (name, app.pinned.contains(&s.session_id), has)
+        })
+        .unwrap_or_default();
 
     let pin_label = if is_pinned { "Unpin" } else { "Pin" };
     let summary_suffix = if has_summary { "" } else { "  (no summary)" };
@@ -2276,24 +2610,18 @@ fn draw_help_popup(f: &mut ratatui::Frame, area: Rect) {
 
     let lines = vec![
         Line::from(""),
-        Line::from(vec![
-            Span::styled("  Navigation", theme::title_style()),
-        ]),
+        Line::from(vec![Span::styled("  Navigation", theme::title_style())]),
         Line::from("    j / ↓        next session"),
         Line::from("    k / ↑        previous session"),
         Line::from("    Tab          toggle focus (active / archived / preview)"),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("  Source filter", theme::title_style()),
-        ]),
+        Line::from(vec![Span::styled("  Source filter", theme::title_style())]),
         Line::from("    1            Claude Code only"),
         Line::from("    2            OpenCode only"),
         Line::from("    3            Copilot only"),
         Line::from("    0            all sources"),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("  Sessions", theme::title_style()),
-        ]),
+        Line::from(vec![Span::styled("  Sessions", theme::title_style())]),
         Line::from("    Enter        resume in tmux"),
         Line::from("    n            new session in project"),
         Line::from("    Ctrl+Y       resume in yolo (skip permissions)"),
@@ -2303,16 +2631,12 @@ fn draw_help_popup(f: &mut ratatui::Frame, area: Rect) {
         Line::from("    r            rename"),
         Line::from("    x            pin / unpin   |   a  archive / unarchive"),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("  Summary", theme::title_style()),
-        ]),
+        Line::from(vec![Span::styled("  Summary", theme::title_style())]),
         Line::from("    Ctrl+R       (re)generate summary + extract learnings"),
         Line::from("    o            save current summary to Obsidian"),
         Line::from("    c            copy summary to clipboard"),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("  Row glyphs", theme::title_style()),
-        ]),
+        Line::from(vec![Span::styled("  Row glyphs", theme::title_style())]),
         Line::from(vec![
             Span::raw("    "),
             Span::styled("*", theme::pin_style()),
@@ -2323,14 +2647,13 @@ fn draw_help_popup(f: &mut ratatui::Frame, area: Rect) {
             Span::raw("  synced to Obsidian"),
         ]),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("  App", theme::title_style()),
-        ]),
+        Line::from(vec![Span::styled("  App", theme::title_style())]),
         Line::from("    s            settings   |   F1  this help   |   q  quit"),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("  press any key to close", theme::dim_style()),
-        ]),
+        Line::from(vec![Span::styled(
+            "  press any key to close",
+            theme::dim_style(),
+        )]),
     ];
 
     let popup = Paragraph::new(lines)
@@ -2352,7 +2675,11 @@ fn draw_settings_popup(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
     let obsidian_display = if app.settings_editing {
         format!("▶ {}|", app.settings_input)
     } else {
-        let val = app.settings.obsidian_kb_path.as_deref().unwrap_or("(not set)");
+        let val = app
+            .settings
+            .obsidian_kb_path
+            .as_deref()
+            .unwrap_or("(not set)");
         format!("  {}", val)
     };
 
@@ -2416,8 +2743,42 @@ fn truncate(s: &str, max: usize) -> String {
 }
 
 fn window_title_from_session(s: &UnifiedSession) -> String {
-    let label = if !s.summary.is_empty() { &s.summary } else { &s.project_name };
+    let label = if !s.summary.is_empty() {
+        &s.summary
+    } else {
+        &s.project_name
+    };
     truncate(label, 10)
+}
+
+/// Compute the daily-note line for a session and push it to today's daily
+/// note. Idempotent via the wikilink marker. Caller decides whether to
+/// surface the result. Returns `Ok(())` if the push succeeded OR was skipped
+/// (push disabled / no vault name); returns `Err(reason)` only on actual CLI
+/// failure when push was attempted.
+fn push_session_to_daily(
+    session: &crate::unified::UnifiedSession,
+    factual: &str,
+    settings: &crate::settings::AppSettings,
+) -> Result<(), String> {
+    if !settings.obsidian_daily_push {
+        return Ok(());
+    }
+    let Some(vault) = settings.effective_vault_name() else {
+        return Ok(()); // no vault configured — nothing to push to
+    };
+
+    let date_str = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let stem = crate::obsidian::note_stem_for_session(session, &date_str);
+    let line = crate::obsidian::build_daily_line(
+        session,
+        &stem,
+        crate::obsidian::parse_status_from_factual(factual),
+        &crate::obsidian::extract_factual_title(factual),
+    );
+    let marker = format!("[[{}]]", stem);
+
+    crate::obsidian_cli::daily_append(&vault, &line, Some(&marker)).map_err(|e| e.to_string())
 }
 
 /// Export the selected session's existing summary + learnings to Obsidian.
@@ -2435,7 +2796,8 @@ fn save_selected_to_obsidian(app: &mut AppState) -> String {
     let (factual_opt, learnings) = {
         let conn = app.db.lock().unwrap_or_else(|e| e.into_inner());
         let factual = crate::store::load_summary_content(&conn, &session.session_id);
-        let learnings = crate::store::load_learnings(&conn, &session.session_id).unwrap_or_default();
+        let learnings =
+            crate::store::load_learnings(&conn, &session.session_id).unwrap_or_default();
         (factual, learnings)
     };
     let Some(factual) = factual_opt else {
@@ -2448,7 +2810,11 @@ fn save_selected_to_obsidian(app: &mut AppState) -> String {
             let _ = crate::store::mark_obsidian_synced(&conn, &session.session_id);
             drop(conn);
             app.obsidian_synced.insert(session.session_id.clone());
-            "Saved to Obsidian".to_string()
+
+            match push_session_to_daily(&session, &factual, &app.settings) {
+                Ok(()) => "Saved to Obsidian".to_string(),
+                Err(why) => format!("Saved (daily push: {})", why),
+            }
         }
         Err(e) => format!("Obsidian save failed: {}", e),
     }
@@ -2458,10 +2824,10 @@ fn save_selected_to_obsidian(app: &mut AppState) -> String {
 /// Tries clip.exe (WSL), xclip, xsel, pbcopy in order.
 fn copy_to_clipboard(text: &str) -> anyhow::Result<()> {
     let candidates: &[(&str, &[&str])] = &[
-        ("clip.exe",  &[]),
-        ("xclip",     &["-selection", "clipboard"]),
-        ("xsel",      &["--clipboard", "--input"]),
-        ("pbcopy",    &[]),
+        ("clip.exe", &[]),
+        ("xclip", &["-selection", "clipboard"]),
+        ("xsel", &["--clipboard", "--input"]),
+        ("pbcopy", &[]),
     ];
     for (cmd, args) in candidates {
         let mut child = match std::process::Command::new(cmd)
@@ -2480,7 +2846,9 @@ fn copy_to_clipboard(text: &str) -> anyhow::Result<()> {
         if let Some(mut stdin) = child.stdin.take() {
             use std::io::Write;
             let bytes = text.as_bytes().to_vec();
-            std::thread::spawn(move || { let _ = stdin.write_all(&bytes); });
+            std::thread::spawn(move || {
+                let _ = stdin.write_all(&bytes);
+            });
         }
         let status = child.wait()?;
         if status.success() {
@@ -2531,4 +2899,3 @@ mod tests {
         assert_eq!(&s[8..9], ":");
     }
 }
-

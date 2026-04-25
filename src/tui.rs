@@ -88,8 +88,8 @@ struct AppState {
     source_filter: Option<SessionSource>, // None = all, Some(CC) = CC only, Some(OC) = OC only
     pinned: std::collections::HashSet<String>,
     archived: std::collections::HashSet<String>,
-    has_learnings: std::collections::HashSet<String>,
-    obsidian_synced: std::collections::HashSet<String>,
+    has_learnings: Arc<Mutex<std::collections::HashSet<String>>>,
+    obsidian_synced: Arc<Mutex<std::collections::HashSet<String>>>,
     db: Arc<Mutex<rusqlite::Connection>>,
     /// Live git status per unique project_path. Populated by a startup batch
     /// and refreshed on selection change (30s stale) and manual `g`.
@@ -175,8 +175,8 @@ impl AppState {
             source_filter: None,
             pinned,
             archived,
-            has_learnings,
-            obsidian_synced,
+            has_learnings: Arc::new(Mutex::new(has_learnings)),
+            obsidian_synced: Arc::new(Mutex::new(obsidian_synced)),
             db: Arc::new(Mutex::new(conn)),
             git_status: Arc::new(Mutex::new(std::collections::HashMap::new())),
             library_entries: Vec::new(),
@@ -1203,6 +1203,8 @@ async fn run_event_loop(
                             let summaries = app.summaries.clone();
                             let generated_at = app.summary_generated_at.clone();
                             let generating = app.generating.clone();
+                            let has_learnings = app.has_learnings.clone();
+                            let obsidian_synced = app.obsidian_synced.clone();
                             let db = app.db.clone();
                             let obsidian_path = app.settings.obsidian_kb_path.clone();
 
@@ -1233,6 +1235,8 @@ async fn run_event_loop(
                                 summaries,
                                 generated_at,
                                 generating,
+                                has_learnings,
+                                obsidian_synced,
                                 db,
                             );
                         }
@@ -1623,6 +1627,8 @@ fn spawn_summary_generation(
     summaries: Arc<Mutex<std::collections::HashMap<String, String>>>,
     summary_generated_at: Arc<Mutex<std::collections::HashMap<String, i64>>>,
     generating: Arc<Mutex<std::collections::HashSet<String>>>,
+    has_learnings: Arc<Mutex<std::collections::HashSet<String>>>,
+    obsidian_synced: Arc<Mutex<std::collections::HashSet<String>>>,
     db: Arc<Mutex<rusqlite::Connection>>,
 ) {
     generating
@@ -1696,6 +1702,12 @@ fn spawn_summary_generation(
                             &id,
                             &new_points,
                         );
+                        // Update the in-memory set so the ✓ glyph appears immediately
+                        // on the row without waiting for the next launch.
+                        has_learnings
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(id.clone());
                     }
 
                     // 3. Load ALL learnings (existing + new) for combined display
@@ -1731,6 +1743,12 @@ fn spawn_summary_generation(
                                 &db.lock().unwrap_or_else(|e| e.into_inner()),
                                 &id,
                             );
+                            // Update the in-memory set so the ◆ glyph appears immediately
+                            // on the row without waiting for the next launch.
+                            obsidian_synced
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .insert(id.clone());
                             // Snapshot settings now (we're outside the TUI, so we can't
                             // borrow AppState). Read fresh from the DB.
                             let settings_snapshot = {
@@ -1961,14 +1979,24 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
+        let has_learnings_set = app
+            .has_learnings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let obsidian_synced_set = app
+            .obsidian_synced
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
 
         draw_list(
             f,
             list_panes[0],
             &app.sessions,
             &app.pinned,
-            &app.has_learnings,
-            &app.obsidian_synced,
+            &has_learnings_set,
+            &obsidian_synced_set,
             &git_cache,
             &generating_set,
             &app.filtered_active,
@@ -1983,8 +2011,8 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
                 list_panes[1],
                 &app.sessions,
                 &app.pinned,
-                &app.has_learnings,
-                &app.obsidian_synced,
+                &has_learnings_set,
+                &obsidian_synced_set,
                 &git_cache,
                 &generating_set,
                 &app.filtered_archived,
@@ -2912,7 +2940,10 @@ fn save_selected_to_obsidian(app: &mut AppState) -> String {
             let conn = app.db.lock().unwrap_or_else(|e| e.into_inner());
             let _ = crate::store::mark_obsidian_synced(&conn, &session.session_id);
             drop(conn);
-            app.obsidian_synced.insert(session.session_id.clone());
+            app.obsidian_synced
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(session.session_id.clone());
 
             // Daily push runs off the main thread to keep the TUI responsive
             // (each CLI call costs 150–400 ms). Result is fire-and-forget;

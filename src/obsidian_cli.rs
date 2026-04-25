@@ -58,3 +58,21 @@ pub fn is_available() -> bool {
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
+
+/// Probe whether the named vault is currently open in a running Obsidian
+/// instance. Returns false if the CLI is missing, the app isn't running,
+/// the vault isn't open, or the eval otherwise fails.
+pub fn vault_is_running(vault: &str) -> bool {
+    let output = Command::new("obsidian")
+        .arg(format!("vault={}", vault))
+        .arg("eval")
+        .arg(r#"code=app.vault.getName()"#)
+        .output();
+    match output {
+        Ok(o) if o.status.success() => {
+            // CLI prints "=> <value>" — accept anything non-empty.
+            !String::from_utf8_lossy(&o.stdout).trim().is_empty()
+        }
+        _ => false,
+    }
+}

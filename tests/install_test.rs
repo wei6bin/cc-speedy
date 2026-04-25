@@ -26,8 +26,8 @@ fn test_hook_entry_has_correct_structure() {
 
 #[test]
 fn test_install_is_idempotent() {
-    use tempfile::TempDir;
     use std::fs;
+    use tempfile::TempDir;
 
     // Create a temp settings file with an existing SessionEnd hook
     let tmp = TempDir::new().unwrap();
@@ -43,7 +43,11 @@ fn test_install_is_idempotent() {
             }]
         }
     });
-    fs::write(&settings_path, serde_json::to_string_pretty(&existing).unwrap()).unwrap();
+    fs::write(
+        &settings_path,
+        serde_json::to_string_pretty(&existing).unwrap(),
+    )
+    .unwrap();
 
     // Run install with this path
     cc_speedy::install::install_to(&settings_path, "/bin/cc-speedy").unwrap();
@@ -57,8 +61,8 @@ fn test_install_is_idempotent() {
 
 #[test]
 fn test_install_adds_hook_to_empty_settings() {
-    use tempfile::TempDir;
     use std::fs;
+    use tempfile::TempDir;
 
     let tmp = TempDir::new().unwrap();
     let settings_path = tmp.path().join("settings.json");
@@ -76,8 +80,8 @@ fn test_install_adds_hook_to_empty_settings() {
 
 #[test]
 fn test_install_creates_new_settings_when_file_missing() {
-    use tempfile::TempDir;
     use std::fs;
+    use tempfile::TempDir;
 
     let tmp = TempDir::new().unwrap();
     let settings_path = tmp.path().join("settings.json");
@@ -92,8 +96,8 @@ fn test_install_creates_new_settings_when_file_missing() {
 
 #[test]
 fn test_install_errors_on_unreadable_file() {
-    use tempfile::TempDir;
     use std::fs;
+    use tempfile::TempDir;
 
     // Create a file with content that is NOT valid JSON but IS readable
     let tmp = TempDir::new().unwrap();
@@ -102,5 +106,8 @@ fn test_install_errors_on_unreadable_file() {
 
     let result = cc_speedy::install::install_to(&settings_path, "/bin/cc-speedy");
     // serde_json parse error — should propagate as Err
-    assert!(result.is_err(), "expected error for invalid JSON settings file");
+    assert!(
+        result.is_err(),
+        "expected error for invalid JSON settings file"
+    );
 }

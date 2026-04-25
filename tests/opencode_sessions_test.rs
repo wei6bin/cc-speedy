@@ -4,18 +4,27 @@ use cc_speedy::opencode_sessions::{opencode_db_path, parse_opencode_messages_fro
 fn test_opencode_db_path_ends_with_db_file() {
     if let Some(p) = opencode_db_path() {
         let s = p.to_string_lossy();
-        assert!(s.ends_with("opencode.db"), "expected path to end with opencode.db, got: {}", s);
-        assert!(s.contains("opencode"), "expected path to contain 'opencode': {}", s);
+        assert!(
+            s.ends_with("opencode.db"),
+            "expected path to end with opencode.db, got: {}",
+            s
+        );
+        assert!(
+            s.contains("opencode"),
+            "expected path to contain 'opencode': {}",
+            s
+        );
     }
     // If None: opencode not installed; that's acceptable — test passes
 }
 
-use rusqlite::Connection;
 use cc_speedy::opencode_sessions::query_sessions_from_conn;
+use rusqlite::Connection;
 
 fn setup_fixture_db() -> Connection {
     let conn = Connection::open_in_memory().unwrap();
-    conn.execute_batch("
+    conn.execute_batch(
+        "
         CREATE TABLE project (
             id TEXT PRIMARY KEY,
             worktree TEXT NOT NULL,
@@ -74,7 +83,9 @@ fn setup_fixture_db() -> Connection {
             'prt2', 'msg2', 'ses_aaa', 1741600000002,
             '{\"type\":\"text\",\"text\":\"Sure, here are some tests.\"}'
         );
-    ").unwrap();
+    ",
+    )
+    .unwrap();
     conn
 }
 
@@ -82,7 +93,12 @@ fn setup_fixture_db() -> Connection {
 fn test_query_returns_top_level_sessions_only() {
     let conn = setup_fixture_db();
     let sessions = query_sessions_from_conn(&conn).unwrap();
-    assert_eq!(sessions.len(), 1, "expected 1 session, got: {:?}", sessions.iter().map(|s| &s.session_id).collect::<Vec<_>>());
+    assert_eq!(
+        sessions.len(),
+        1,
+        "expected 1 session, got: {:?}",
+        sessions.iter().map(|s| &s.session_id).collect::<Vec<_>>()
+    );
     assert_eq!(sessions[0].session_id, "ses_aaa");
 }
 
@@ -138,4 +154,3 @@ fn test_parse_opencode_messages_skips_non_text_parts() {
     // Still only 2 text messages; tool-use part skipped
     assert_eq!(messages.len(), 2);
 }
-

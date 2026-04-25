@@ -17,7 +17,9 @@ fn filter_library(entries: &[LearningEntry], category: Option<&str>, query: &str
         .enumerate()
         .filter(|(_, e)| {
             if let Some(c) = category {
-                if e.category != c { return false; }
+                if e.category != c {
+                    return false;
+                }
             }
             q.is_empty() || e.point.to_lowercase().contains(&q)
         })
@@ -42,9 +44,18 @@ fn test_category_filter_only() {
         mk("s1", "lessons_gotchas", "mock DB burned us", 2),
         mk("s2", "tools_commands", "git worktree", 3),
     ];
-    assert_eq!(filter_library(&entries, Some("decision_points"), ""), vec![0]);
-    assert_eq!(filter_library(&entries, Some("lessons_gotchas"), ""), vec![1]);
-    assert_eq!(filter_library(&entries, Some("tools_commands"), ""), vec![2]);
+    assert_eq!(
+        filter_library(&entries, Some("decision_points"), ""),
+        vec![0]
+    );
+    assert_eq!(
+        filter_library(&entries, Some("lessons_gotchas"), ""),
+        vec![1]
+    );
+    assert_eq!(
+        filter_library(&entries, Some("tools_commands"), ""),
+        vec![2]
+    );
 }
 
 #[test]
@@ -66,7 +77,10 @@ fn test_category_and_text_compose() {
         mk("s3", "lessons_gotchas", "postgres locking gotcha", 3),
     ];
     // category = decision_points AND query = postgres → only entry 0
-    assert_eq!(filter_library(&entries, Some("decision_points"), "postgres"), vec![0]);
+    assert_eq!(
+        filter_library(&entries, Some("decision_points"), "postgres"),
+        vec![0]
+    );
     // query alone = postgres → entries 0 and 2
     assert_eq!(filter_library(&entries, None, "postgres"), vec![0, 2]);
 }

@@ -1,5 +1,5 @@
 use cc_speedy::tui::build_project_rows;
-use cc_speedy::unified::{UnifiedSession, SessionSource};
+use cc_speedy::unified::{SessionSource, UnifiedSession};
 use std::collections::HashSet;
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -29,10 +29,16 @@ fn test_build_groups_by_project_path() {
     let pinned = HashSet::new();
     let rows = build_project_rows(&sessions, &pinned);
     assert_eq!(rows.len(), 2);
-    let alpha = rows.iter().find(|r| r.project_path == "/repo/alpha").unwrap();
+    let alpha = rows
+        .iter()
+        .find(|r| r.project_path == "/repo/alpha")
+        .unwrap();
     assert_eq!(alpha.session_count, 2);
     assert_eq!(alpha.last_active, UNIX_EPOCH + Duration::from_secs(200));
-    let beta = rows.iter().find(|r| r.project_path == "/repo/beta").unwrap();
+    let beta = rows
+        .iter()
+        .find(|r| r.project_path == "/repo/beta")
+        .unwrap();
     assert_eq!(beta.session_count, 1);
     assert_eq!(beta.last_active, UNIX_EPOCH + Duration::from_secs(150));
 }

@@ -1,4 +1,4 @@
-use cc_speedy::summary::{build_new_session_context, read_summary, write_summary, summary_path};
+use cc_speedy::summary::{build_new_session_context, read_summary, summary_path, write_summary};
 
 #[test]
 fn test_build_new_session_context_prepends_prefix() {
@@ -8,8 +8,8 @@ fn test_build_new_session_context_prepends_prefix() {
     assert!(ctx.contains("Fixed a bug"));
     assert!(ctx.contains("Decision: X"));
 }
-use tempfile::TempDir;
 use std::path::PathBuf;
+use tempfile::TempDir;
 
 #[test]
 fn test_write_and_read_summary() {
@@ -56,7 +56,7 @@ fn test_run_hook_skips_when_session_id_empty() {
 
 #[test]
 fn test_run_hook_skips_if_summary_already_exists() {
-    use cc_speedy::summary::{write_summary, summary_path, read_summary};
+    use cc_speedy::summary::{read_summary, summary_path, write_summary};
     // Write a summary file for a fake session
     let tmp_id = "test-session-already-exists";
     // Use temp path to avoid polluting real summaries dir
@@ -79,8 +79,16 @@ fn test_find_jsonl_returns_none_for_nonexistent_session() {
 fn test_opencode_summary_path_uses_local_share() {
     let path = cc_speedy::summary::opencode_summary_path("ses_abc123");
     let path_str = path.to_string_lossy();
-    assert!(path_str.contains("opencode"), "path should contain 'opencode': {}", path_str);
-    assert!(path_str.contains("ses_abc123"), "path should contain session id: {}", path_str);
+    assert!(
+        path_str.contains("opencode"),
+        "path should contain 'opencode': {}",
+        path_str
+    );
+    assert!(
+        path_str.contains("ses_abc123"),
+        "path should contain session id: {}",
+        path_str
+    );
     assert!(path_str.ends_with(".md"));
 }
 
@@ -89,6 +97,9 @@ fn test_opencode_summary_path_sanitizes_id() {
     // path traversal attempt should be neutralised
     let path = cc_speedy::summary::opencode_summary_path("../../etc/passwd");
     let path_str = path.to_string_lossy();
-    assert!(!path_str.contains(".."), "path should not contain '..': {}", path_str);
+    assert!(
+        !path_str.contains(".."),
+        "path should not contain '..': {}",
+        path_str
+    );
 }
-

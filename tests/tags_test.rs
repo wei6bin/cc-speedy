@@ -1,17 +1,26 @@
-use cc_speedy::store::{normalize_tag, parse_tags, open_db, set_tags, load_tags, load_all_tags};
+use cc_speedy::store::{load_all_tags, load_tags, normalize_tag, open_db, parse_tags, set_tags};
 use cc_speedy::tui::parse_filter_tokens;
 
 #[test]
 fn test_normalize_tag_trims_and_lowercases() {
     assert_eq!(normalize_tag("  WIP  "), Some("wip".to_string()));
-    assert_eq!(normalize_tag("NeedsReview"), Some("needsreview".to_string()));
+    assert_eq!(
+        normalize_tag("NeedsReview"),
+        Some("needsreview".to_string())
+    );
 }
 
 #[test]
 fn test_normalize_tag_strips_invalid_chars() {
-    assert_eq!(normalize_tag("needs review"), Some("needsreview".to_string()));
+    assert_eq!(
+        normalize_tag("needs review"),
+        Some("needsreview".to_string())
+    );
     assert_eq!(normalize_tag("foo!@#$bar"), Some("foobar".to_string()));
-    assert_eq!(normalize_tag("foo-bar_baz"), Some("foo-bar_baz".to_string()));
+    assert_eq!(
+        normalize_tag("foo-bar_baz"),
+        Some("foo-bar_baz".to_string())
+    );
 }
 
 #[test]
@@ -90,6 +99,9 @@ fn test_load_all_tags_groups_by_session() {
     set_tags(&conn, "s2", &["blocked".into(), "wip".into()]).unwrap();
     let map = load_all_tags(&conn).unwrap();
     assert_eq!(map.get("s1").unwrap(), &vec!["wip".to_string()]);
-    assert_eq!(map.get("s2").unwrap(), &vec!["blocked".to_string(), "wip".to_string()]);
+    assert_eq!(
+        map.get("s2").unwrap(),
+        &vec!["blocked".to_string(), "wip".to_string()]
+    );
     let _ = open_db; // silence unused import
 }

@@ -3,43 +3,78 @@ use cc_speedy::git_status::{parse_porcelain, GitStatus};
 #[test]
 fn test_parse_clean_with_tracking() {
     let stdout = "## feat/x...origin/feat/x\n";
-    assert_eq!(parse_porcelain(stdout), GitStatus::Clean { branch: "feat/x".to_string() });
+    assert_eq!(
+        parse_porcelain(stdout),
+        GitStatus::Clean {
+            branch: "feat/x".to_string()
+        }
+    );
 }
 
 #[test]
 fn test_parse_clean_no_tracking() {
     let stdout = "## master\n";
-    assert_eq!(parse_porcelain(stdout), GitStatus::Clean { branch: "master".to_string() });
+    assert_eq!(
+        parse_porcelain(stdout),
+        GitStatus::Clean {
+            branch: "master".to_string()
+        }
+    );
 }
 
 #[test]
 fn test_parse_dirty_modified_file() {
     let stdout = "## feat/x...origin/feat/x\n M src/main.rs\n";
-    assert_eq!(parse_porcelain(stdout), GitStatus::Dirty { branch: "feat/x".to_string() });
+    assert_eq!(
+        parse_porcelain(stdout),
+        GitStatus::Dirty {
+            branch: "feat/x".to_string()
+        }
+    );
 }
 
 #[test]
 fn test_parse_dirty_untracked_only() {
     let stdout = "## master\n?? new-file.txt\n";
-    assert_eq!(parse_porcelain(stdout), GitStatus::Dirty { branch: "master".to_string() });
+    assert_eq!(
+        parse_porcelain(stdout),
+        GitStatus::Dirty {
+            branch: "master".to_string()
+        }
+    );
 }
 
 #[test]
 fn test_parse_dirty_multiple_changes() {
     let stdout = "## feat/x\n M a.rs\nMM b.rs\n?? c.rs\n";
-    assert_eq!(parse_porcelain(stdout), GitStatus::Dirty { branch: "feat/x".to_string() });
+    assert_eq!(
+        parse_porcelain(stdout),
+        GitStatus::Dirty {
+            branch: "feat/x".to_string()
+        }
+    );
 }
 
 #[test]
 fn test_parse_detached_head() {
     let stdout = "## HEAD (no branch)\n";
-    assert_eq!(parse_porcelain(stdout), GitStatus::Clean { branch: "HEAD (no branch)".to_string() });
+    assert_eq!(
+        parse_porcelain(stdout),
+        GitStatus::Clean {
+            branch: "HEAD (no branch)".to_string()
+        }
+    );
 }
 
 #[test]
 fn test_parse_ahead_behind_tracking_stripped() {
     let stdout = "## feat/x...origin/feat/x [ahead 2, behind 1]\n";
-    assert_eq!(parse_porcelain(stdout), GitStatus::Clean { branch: "feat/x".to_string() });
+    assert_eq!(
+        parse_porcelain(stdout),
+        GitStatus::Clean {
+            branch: "feat/x".to_string()
+        }
+    );
 }
 
 #[test]

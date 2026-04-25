@@ -133,7 +133,11 @@ pub fn normalize_tag(raw: &str) -> Option<String> {
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
         .collect();
-    if norm.is_empty() { None } else { Some(norm) }
+    if norm.is_empty() {
+        None
+    } else {
+        Some(norm)
+    }
 }
 
 /// Parse a user-typed comma-separated tag string. Returns a deduplicated,
@@ -164,7 +168,10 @@ pub fn load_tags(conn: &Connection, session_id: &str) -> Result<Vec<String>> {
 pub fn set_tags(conn: &Connection, session_id: &str, tags: &[String]) -> Result<()> {
     conn.execute("BEGIN", [])?;
     let run = || -> Result<()> {
-        conn.execute("DELETE FROM tags WHERE session_id = ?1", params![session_id])?;
+        conn.execute(
+            "DELETE FROM tags WHERE session_id = ?1",
+            params![session_id],
+        )?;
         for t in tags {
             conn.execute(
                 "INSERT OR IGNORE INTO tags (session_id, tag) VALUES (?1, ?2)",
@@ -472,4 +479,18 @@ pub fn set_setting(conn: &Connection, key: &str, value: &str) -> Result<()> {
         params![key, value],
     )?;
     Ok(())
+}
+
+/// Read a setting as bool. Encoded as "1" / "0". Anything else → `default`.
+pub fn get_setting_bool(conn: &Connection, key: &str, default: bool) -> bool {
+    match get_setting(conn, key).as_deref() {
+        Some("1") => true,
+        Some("0") => false,
+        _ => default,
+    }
+}
+
+/// Persist a bool setting.
+pub fn set_setting_bool(conn: &Connection, key: &str, value: bool) -> Result<()> {
+    set_setting(conn, key, if value { "1" } else { "0" })
 }

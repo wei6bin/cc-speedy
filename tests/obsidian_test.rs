@@ -144,3 +144,63 @@ fn test_parse_status_unrecognised_value() {
     let body = "## Status\nBlocked on infra\n";
     assert_eq!(parse_status_from_factual(body), "unknown");
 }
+
+use cc_speedy::obsidian::build_frontmatter_tags;
+
+fn lp(cat: &str) -> LearningPoint {
+    LearningPoint {
+        category: cat.to_string(),
+        point: "x".to_string(),
+    }
+}
+
+#[test]
+fn test_tags_baseline_no_learnings() {
+    let tags = build_frontmatter_tags("cc", "completed", &[]);
+    assert_eq!(
+        tags,
+        vec![
+            "agent-session".to_string(),
+            "cc-source/cc".to_string(),
+            "cc-status/completed".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn test_tags_with_learning_counts_and_facets() {
+    let learnings = vec![
+        lp("decision_points"),
+        lp("decision_points"),
+        lp("lessons_gotchas"),
+        lp("tools_commands"),
+    ];
+    let tags = build_frontmatter_tags("oc", "in_progress", &learnings);
+    assert_eq!(
+        tags,
+        vec![
+            "agent-session".to_string(),
+            "cc-source/oc".to_string(),
+            "cc-status/in_progress".to_string(),
+            "cc-decisions/2".to_string(),
+            "cc-lessons/1".to_string(),
+            "cc-tools/1".to_string(),
+            "cc-has-decisions".to_string(),
+            "cc-has-lessons".to_string(),
+            "cc-has-tools".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn test_tags_skip_zero_count_categories() {
+    let learnings = vec![lp("lessons_gotchas")];
+    let tags = build_frontmatter_tags("co", "unknown", &learnings);
+    // Only the "lessons" family should appear.
+    assert!(tags.contains(&"cc-lessons/1".to_string()));
+    assert!(tags.contains(&"cc-has-lessons".to_string()));
+    assert!(!tags.iter().any(|t| t.starts_with("cc-decisions/")));
+    assert!(!tags.iter().any(|t| t.starts_with("cc-tools/")));
+    assert!(!tags.contains(&"cc-has-decisions".to_string()));
+    assert!(!tags.contains(&"cc-has-tools".to_string()));
+}

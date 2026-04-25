@@ -26,6 +26,58 @@ pub fn parse_status_from_factual(body: &str) -> &'static str {
     "unknown"
 }
 
+/// Build the ordered list of tags that go into the session note's frontmatter.
+/// Order is deterministic so re-exports produce stable diffs.
+///
+/// `source` should be `"cc"`, `"oc"`, or `"co"`. `status` is the lower-snake form
+/// from `parse_status_from_factual`.
+pub fn build_frontmatter_tags(
+    source: &str,
+    status: &str,
+    learnings: &[crate::store::LearningPoint],
+) -> Vec<String> {
+    let mut count_decisions = 0usize;
+    let mut count_lessons = 0usize;
+    let mut count_tools = 0usize;
+    for l in learnings {
+        match l.category.as_str() {
+            "decision_points" => count_decisions += 1,
+            "lessons_gotchas" => count_lessons += 1,
+            "tools_commands" => count_tools += 1,
+            _ => {}
+        }
+    }
+
+    let mut tags: Vec<String> = Vec::with_capacity(16);
+    tags.push("agent-session".to_string());
+    tags.push(format!("cc-source/{}", source));
+    tags.push(format!("cc-status/{}", status));
+
+    // Counted slash-tags first.
+    if count_decisions > 0 {
+        tags.push(format!("cc-decisions/{}", count_decisions));
+    }
+    if count_lessons > 0 {
+        tags.push(format!("cc-lessons/{}", count_lessons));
+    }
+    if count_tools > 0 {
+        tags.push(format!("cc-tools/{}", count_tools));
+    }
+
+    // Bare facets second.
+    if count_decisions > 0 {
+        tags.push("cc-has-decisions".to_string());
+    }
+    if count_lessons > 0 {
+        tags.push("cc-has-lessons".to_string());
+    }
+    if count_tools > 0 {
+        tags.push("cc-has-tools".to_string());
+    }
+
+    tags
+}
+
 /// Write a weekly digest markdown file to `<vault>/cc-speedy/digests/YYYY-Www.md`.
 /// Returns the relative path (from vault root) for display.
 pub fn export_digest(vault_path: &str, digest_text: &str) -> Result<String> {

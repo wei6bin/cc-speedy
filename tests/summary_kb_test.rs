@@ -1,5 +1,5 @@
-use cc_speedy::summary::{parse_learning_output, build_combined_display};
 use cc_speedy::store::LearningPoint;
+use cc_speedy::summary::{build_combined_display, parse_learning_output};
 
 #[test]
 fn test_parse_learning_output_handles_trailing_colon_heading() {
@@ -28,7 +28,10 @@ fn test_parse_learning_output_extracts_bullets() {
     let points = parse_learning_output(md);
     assert_eq!(points.len(), 4);
     assert_eq!(points[0].category, "decision_points");
-    assert_eq!(points[0].point, "chose SQLite over flat files: simpler migration");
+    assert_eq!(
+        points[0].point,
+        "chose SQLite over flat files: simpler migration"
+    );
     assert_eq!(points[2].category, "lessons_gotchas");
     assert_eq!(points[3].category, "tools_commands");
 }
@@ -72,11 +75,20 @@ fn test_build_combined_display_empty_learnings() {
 #[test]
 fn test_build_combined_display_includes_learnings() {
     let learnings = vec![
-        LearningPoint { category: "decision_points".to_string(), point: "used tokio::spawn".to_string() },
-        LearningPoint { category: "lessons_gotchas".to_string(), point: "mutex guard must be dropped".to_string() },
+        LearningPoint {
+            category: "decision_points".to_string(),
+            point: "used tokio::spawn".to_string(),
+        },
+        LearningPoint {
+            category: "lessons_gotchas".to_string(),
+            point: "mutex guard must be dropped".to_string(),
+        },
     ];
     let combined = build_combined_display("## What was done\n- fixed bug", &learnings);
-    assert!(combined.contains("Knowledge Capture"), "should have knowledge section header");
+    assert!(
+        combined.contains("Knowledge Capture"),
+        "should have knowledge section header"
+    );
     assert!(combined.contains("used tokio::spawn"));
     assert!(combined.contains("mutex guard must be dropped"));
     assert!(combined.contains("## Decision points"));

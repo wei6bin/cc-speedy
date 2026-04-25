@@ -1,6 +1,6 @@
 use cc_speedy::sessions::{parse_messages, read_cwd_from_jsonl, SessionIndex};
-use tempfile::TempDir;
 use std::io::Write;
+use tempfile::TempDir;
 
 #[test]
 fn test_parse_messages_counts_correctly() {
@@ -29,7 +29,11 @@ fn test_parse_messages_empty_file_returns_empty_vec() {
 fn test_parse_messages_skips_malformed_lines() {
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("mixed.jsonl");
-    std::fs::write(&path, "not json\n{\"type\":\"user\",\"message\":{\"content\":\"hello\"}}\n}broken{\n").unwrap();
+    std::fs::write(
+        &path,
+        "not json\n{\"type\":\"user\",\"message\":{\"content\":\"hello\"}}\n}broken{\n",
+    )
+    .unwrap();
     let msgs = parse_messages(&path).unwrap();
     assert_eq!(msgs.len(), 1);
     assert_eq!(msgs[0].role, "user");
@@ -40,11 +44,13 @@ fn test_parse_messages_skips_malformed_lines() {
 fn test_parse_messages_skips_non_user_assistant_roles() {
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("roles.jsonl");
-    std::fs::write(&path,
+    std::fs::write(
+        &path,
         "{\"type\":\"system\",\"message\":{\"content\":\"sys\"}}\n\
          {\"type\":\"user\",\"message\":{\"content\":\"hi\"}}\n\
-         {\"type\":\"tool\",\"message\":{\"content\":\"output\"}}\n"
-    ).unwrap();
+         {\"type\":\"tool\",\"message\":{\"content\":\"output\"}}\n",
+    )
+    .unwrap();
     let msgs = parse_messages(&path).unwrap();
     assert_eq!(msgs.len(), 1);
     assert_eq!(msgs[0].role, "user");
@@ -54,11 +60,13 @@ fn test_parse_messages_skips_non_user_assistant_roles() {
 fn test_read_cwd_from_jsonl_finds_cwd() {
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("test.jsonl");
-    std::fs::write(&path,
+    std::fs::write(
+        &path,
         "{\"type\":\"user\"}\n\
          {\"cwd\":\"/home/user/myproject\",\"type\":\"system\"}\n\
-         {\"type\":\"assistant\"}\n"
-    ).unwrap();
+         {\"type\":\"assistant\"}\n",
+    )
+    .unwrap();
     let cwd = read_cwd_from_jsonl(&path);
     assert_eq!(cwd, Some("/home/user/myproject".to_string()));
 }
@@ -67,7 +75,11 @@ fn test_read_cwd_from_jsonl_finds_cwd() {
 fn test_read_cwd_from_jsonl_returns_none_when_absent() {
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("nocwd.jsonl");
-    std::fs::write(&path, "{\"type\":\"user\",\"message\":{\"content\":\"hello\"}}\n").unwrap();
+    std::fs::write(
+        &path,
+        "{\"type\":\"user\",\"message\":{\"content\":\"hello\"}}\n",
+    )
+    .unwrap();
     assert!(read_cwd_from_jsonl(&path).is_none());
 }
 
@@ -75,10 +87,12 @@ fn test_read_cwd_from_jsonl_returns_none_when_absent() {
 fn test_read_cwd_from_jsonl_skips_malformed_lines() {
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("malformed.jsonl");
-    std::fs::write(&path,
+    std::fs::write(
+        &path,
         "not json at all\n\
-         {\"cwd\":\"/found/it\"}\n"
-    ).unwrap();
+         {\"cwd\":\"/found/it\"}\n",
+    )
+    .unwrap();
     // Should not abort on the malformed line, but find the cwd
     let cwd = read_cwd_from_jsonl(&path);
     assert_eq!(cwd, Some("/found/it".to_string()));
@@ -130,7 +144,10 @@ fn test_sessions_index_deserialization() {
     assert_eq!(index.original_path, "/home/weibin/repo/ai/cc-speedy");
     assert_eq!(index.entries.len(), 2);
     let first = &index.entries[0];
-    assert_eq!(first.summary, "sessions-index.json Integration + UI Improvements");
+    assert_eq!(
+        first.summary,
+        "sessions-index.json Integration + UI Improvements"
+    );
     assert_eq!(first.git_branch, "feature/sessions-index");
     assert_eq!(first.message_count, 42);
     assert!(!first.is_sidechain);
@@ -152,10 +169,6 @@ fn test_file_mtime_milliseconds_conversion() {
     // 1709654400000 ms = 1709654400 seconds
     let file_mtime: u64 = 1709654400000;
     let system_time = UNIX_EPOCH + Duration::from_millis(file_mtime);
-    let secs = system_time
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let secs = system_time.duration_since(UNIX_EPOCH).unwrap().as_secs();
     assert_eq!(secs, 1709654400);
 }
-

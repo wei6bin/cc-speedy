@@ -57,11 +57,17 @@ pub fn parse_messages(path: &Path) -> Result<Vec<Message>> {
     let content = std::fs::read_to_string(path)?;
     let mut msgs = Vec::new();
     for line in content.lines() {
-        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
         let role = v["type"].as_str().unwrap_or("").to_string();
-        if role != "user" && role != "assistant" { continue; }
+        if role != "user" && role != "assistant" {
+            continue;
+        }
         let text = extract_text(&v["message"]["content"]);
-        if text.is_empty() { continue; }
+        if text.is_empty() {
+            continue;
+        }
         msgs.push(Message { role, text });
     }
     Ok(msgs)
@@ -76,7 +82,9 @@ pub fn read_cwd_from_jsonl(path: &Path) -> Option<String> {
     let reader = std::io::BufReader::new(file);
     for line in reader.lines() {
         let Ok(line) = line else { continue };
-        let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
         if let Some(cwd) = v["cwd"].as_str() {
             if !cwd.is_empty() {
                 return Some(cwd.to_string());
@@ -94,7 +102,9 @@ pub fn parse_session_title(path: &Path) -> Option<String> {
     // The summary entry is typically near the end — scan all, keep last one found
     let mut title = None;
     for line in content.lines() {
-        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
         if v["type"].as_str() == Some("summary") {
             if let Some(s) = v["summary"].as_str() {
                 if !s.is_empty() {
@@ -137,7 +147,9 @@ pub fn read_rename_history() -> std::collections::HashMap<String, String> {
     // Collect (timestamp, session_id, rename_title) triples, then keep latest per session
     let mut entries: Vec<(u64, String, String)> = Vec::new();
     for line in content.lines() {
-        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
         let session_id = match v["sessionId"].as_str() {
             Some(s) if !s.is_empty() => s.to_string(),
             _ => continue,
@@ -147,13 +159,19 @@ pub fn read_rename_history() -> std::collections::HashMap<String, String> {
             None => continue,
         };
         // First line of display, stripping leading `'` (artifact from cc-speedy display)
-        let first_line = display.lines().next().unwrap_or("").trim_start_matches('\'');
+        let first_line = display
+            .lines()
+            .next()
+            .unwrap_or("")
+            .trim_start_matches('\'');
         let title = if let Some(t) = first_line.strip_prefix("/rename ") {
             t.trim().to_string()
         } else {
             continue;
         };
-        if title.is_empty() { continue; }
+        if title.is_empty() {
+            continue;
+        }
         let ts = v["timestamp"].as_u64().unwrap_or(0);
         entries.push((ts, session_id, title));
     }
@@ -180,7 +198,10 @@ pub fn write_rename(session_id: &str, title: &str) -> anyhow::Result<()> {
         "timestamp": ts,
     });
     use std::io::Write;
-    let mut file = std::fs::OpenOptions::new().append(true).create(true).open(&path)?;
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&path)?;
     writeln!(file, "{}", entry)?;
     Ok(())
 }
@@ -203,25 +224,39 @@ pub fn list_sessions() -> Result<Vec<Session>> {
     let mut sessions = Vec::new();
     let renames = read_rename_history();
 
-    'proj: for proj_entry in std::fs::read_dir(&claude_dir)? {
+    for proj_entry in std::fs::read_dir(&claude_dir)? {
         let proj_entry = proj_entry?;
         let proj_path = proj_entry.path();
-        if !proj_path.is_dir() { continue; }
+        if !proj_path.is_dir() {
+            continue;
+        }
 
-        // Index path: try sessions-index.json first
+        // Consume sessions-index.json if present, but track which session IDs it
+        // covered so we still pick up newer JSONLs that the (potentially stale)
+        // index doesn't know about.
+        let mut indexed_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
         if let Some(index) = read_sessions_index(&proj_path) {
             let project_path = index.original_path.clone();
             let project_name = path_to_display_name(&project_path);
 
             for entry in &index.entries {
-                if entry.is_sidechain { continue; }
-                if entry.message_count < 4 { continue; }
-                if entry.first_prompt.contains("local-command-caveat") && entry.message_count < 10 { continue; }
+                indexed_ids.insert(entry.session_id.clone());
+
+                if entry.is_sidechain {
+                    continue;
+                }
+                if entry.message_count < 4 {
+                    continue;
+                }
+                if entry.first_prompt.contains("local-command-caveat") && entry.message_count < 10 {
+                    continue;
+                }
 
                 let modified = UNIX_EPOCH + Duration::from_millis(entry.file_mtime);
                 let first_user_msg: String = entry.first_prompt.chars().take(80).collect();
 
-                let summary = renames.get(&entry.session_id)
+                let summary = renames
+                    .get(&entry.session_id)
                     .cloned()
                     .unwrap_or_else(|| entry.summary.clone());
                 sessions.push(Session {
@@ -236,49 +271,69 @@ pub fn list_sessions() -> Result<Vec<Session>> {
                     git_branch: entry.git_branch.clone(),
                 });
             }
-            continue 'proj;
         }
 
-        // Fallback path: existing jsonl parsing logic
-        let Ok(dir_iter) = std::fs::read_dir(&proj_path) else { continue; };
+        // Fallback / supplement: scan the directory and parse any JSONL whose
+        // session_id wasn't already covered by the index above.
+        let Ok(dir_iter) = std::fs::read_dir(&proj_path) else {
+            continue;
+        };
         for file_entry in dir_iter {
-            let Ok(file_entry) = file_entry else { continue; };
+            let Ok(file_entry) = file_entry else {
+                continue;
+            };
             let file_path = file_entry.path();
-            if file_path.extension().and_then(|e| e.to_str()) != Some("jsonl") { continue; }
+            if file_path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
 
-            let Ok(metadata) = file_path.metadata() else { continue; };
-            let Ok(modified) = metadata.modified() else { continue; };
+            let session_id_for_dedup = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            if indexed_ids.contains(session_id_for_dedup) {
+                continue;
+            }
+
+            let Ok(metadata) = file_path.metadata() else {
+                continue;
+            };
+            let Ok(modified) = metadata.modified() else {
+                continue;
+            };
 
             let msgs = parse_messages(&file_path).unwrap_or_default();
-            if msgs.len() < 4 { continue; }
+            if msgs.len() < 4 {
+                continue;
+            }
 
-            let first_user_text = msgs.iter()
+            let first_user_text = msgs
+                .iter()
                 .find(|m| m.role == "user")
                 .map(|m| m.text.as_str())
                 .unwrap_or_default();
 
-            if first_user_text.contains("local-command-caveat") && msgs.len() < 10 { continue; }
+            if first_user_text.contains("local-command-caveat") && msgs.len() < 10 {
+                continue;
+            }
 
             let first_user_msg: String = first_user_text.chars().take(80).collect();
 
-            let session_id = file_path.file_stem()
+            let session_id = file_path
+                .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("")
                 .to_string();
 
-            let dir_name = proj_path.file_name()
+            let dir_name = proj_path
+                .file_name()
                 .and_then(|s| s.to_str())
                 .unwrap_or("")
                 .to_string();
             // Prefer cwd from JSONL (accurate) over dir-name decoding (has hyphen ambiguity)
-            let project_path_str = read_cwd_from_jsonl(&file_path)
-                .unwrap_or_else(|| dir_name_to_abs_path(&dir_name));
+            let project_path_str =
+                read_cwd_from_jsonl(&file_path).unwrap_or_else(|| dir_name_to_abs_path(&dir_name));
             let project_name = path_to_display_name(&project_path_str);
 
             let jsonl_title = parse_session_title(&file_path).unwrap_or_default();
-            let summary = renames.get(&session_id)
-                .cloned()
-                .unwrap_or(jsonl_title);
+            let summary = renames.get(&session_id).cloned().unwrap_or(jsonl_title);
 
             sessions.push(Session {
                 session_id,
@@ -310,10 +365,14 @@ pub fn dir_name_to_abs_path(dir_name: &str) -> String {
 
 pub fn dir_name_to_path(dir_name: &str) -> String {
     let abs = dir_name_to_abs_path(dir_name);
-    let parts: Vec<&str> = abs.trim_end_matches('/').split('/').filter(|s| !s.is_empty()).collect();
+    let parts: Vec<&str> = abs
+        .trim_end_matches('/')
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect();
     match parts.len() {
         0 => abs.clone(),
         1 => parts[0].to_string(),
-        n => parts[n-2..].join("/"),
+        n => parts[n - 2..].join("/"),
     }
 }

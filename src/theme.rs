@@ -32,6 +32,9 @@ pub const ARCHIVED_BADGE: Color = Color::Rgb(128, 128, 128); // #808080  gray
 // ── Jobs panel content text ───────────────────────────────────────────
 pub const JOBS_FG: Color = Color::Rgb(212, 160, 23); // #d4a017  warm amber
 
+// ── Obsidian sync indicator ──────────────────────────────────────────
+pub const OBSIDIAN_PURPLE: Color = Color::Rgb(124, 58, 237); // #7c3aed  obsidian brand
+
 // ── Status bar ───────────────────────────────────────────────────────
 pub const STATUS_OK: Color = TITLE; // flash message
 pub const STATUS_HELP: Color = FG_DIM; // help text

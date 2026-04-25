@@ -62,9 +62,42 @@ pub fn open_db() -> Result<Connection> {
              parent_session_id TEXT NOT NULL,
              linked_at         INTEGER NOT NULL DEFAULT (strftime('%s','now'))
          );
-         CREATE INDEX IF NOT EXISTS idx_links_parent ON links (parent_session_id);",
+         CREATE INDEX IF NOT EXISTS idx_links_parent ON links (parent_session_id);
+         CREATE TABLE IF NOT EXISTS obsidian_synced (
+             session_id  TEXT PRIMARY KEY,
+             synced_at   INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+         );
+         CREATE TABLE IF NOT EXISTS insights (
+             session_id   TEXT PRIMARY KEY,
+             source       TEXT NOT NULL,
+             source_mtime INTEGER NOT NULL,
+             blob         TEXT NOT NULL,
+             generated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+         );",
     )?;
     Ok(conn)
+}
+
+/// Mark a session as having been exported to Obsidian. Replaces any prior row
+/// so `synced_at` reflects the most recent successful export.
+pub fn mark_obsidian_synced(conn: &Connection, session_id: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO obsidian_synced (session_id, synced_at)
+         VALUES (?1, strftime('%s','now'))
+         ON CONFLICT(session_id) DO UPDATE SET synced_at = excluded.synced_at",
+        params![session_id],
+    )?;
+    Ok(())
+}
+
+/// Load the set of session IDs that have ever been exported to Obsidian.
+pub fn load_obsidian_synced(conn: &Connection) -> Result<HashSet<String>> {
+    let mut stmt = conn.prepare("SELECT session_id FROM obsidian_synced")?;
+    let set = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(set)
 }
 
 /// Link one session to a parent. Replaces any existing link. Refuses self-link.
@@ -107,7 +140,11 @@ pub fn normalize_tag(raw: &str) -> Option<String> {
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
         .collect();
-    if norm.is_empty() { None } else { Some(norm) }
+    if norm.is_empty() {
+        None
+    } else {
+        Some(norm)
+    }
 }
 
 /// Parse a user-typed comma-separated tag string. Returns a deduplicated,
@@ -138,7 +175,10 @@ pub fn load_tags(conn: &Connection, session_id: &str) -> Result<Vec<String>> {
 pub fn set_tags(conn: &Connection, session_id: &str, tags: &[String]) -> Result<()> {
     conn.execute("BEGIN", [])?;
     let run = || -> Result<()> {
-        conn.execute("DELETE FROM tags WHERE session_id = ?1", params![session_id])?;
+        conn.execute(
+            "DELETE FROM tags WHERE session_id = ?1",
+            params![session_id],
+        )?;
         for t in tags {
             conn.execute(
                 "INSERT OR IGNORE INTO tags (session_id, tag) VALUES (?1, ?2)",
@@ -182,6 +222,16 @@ pub fn load_all_summaries(conn: &Connection) -> Result<HashMap<String, String>> 
         .filter_map(|r| r.ok())
         .collect();
     Ok(map)
+}
+
+/// Load the raw (factual-only) summary content for a single session.
+pub fn load_summary_content(conn: &Connection, session_id: &str) -> Option<String> {
+    conn.query_row(
+        "SELECT content FROM summaries WHERE session_id = ?1",
+        params![session_id],
+        |r| r.get::<_, String>(0),
+    )
+    .ok()
 }
 
 pub fn load_all_generated_at(conn: &Connection) -> Result<HashMap<String, i64>> {
@@ -435,5 +485,85 @@ pub fn set_setting(conn: &Connection, key: &str, value: &str) -> Result<()> {
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         params![key, value],
     )?;
+    Ok(())
+}
+
+/// One cached insights row: the parsed [`SessionInsights`] plus the source file
+/// mtime that generated it. Callers compare `source_mtime` against the live
+/// JSONL mtime to decide whether to recompute.
+#[derive(Debug, Clone)]
+pub struct CachedInsights {
+    pub source_mtime: i64,
+    pub insights: crate::insights::SessionInsights,
+}
+
+/// Load all cached insights, keyed by session_id. Rows whose JSON fails to
+/// deserialize (e.g. after a struct change) are silently dropped — they'll be
+/// recomputed on next access.
+pub fn load_all_insights(conn: &Connection) -> Result<HashMap<String, CachedInsights>> {
+    let mut stmt = conn.prepare("SELECT session_id, source_mtime, blob FROM insights")?;
+    let mut out: HashMap<String, CachedInsights> = HashMap::new();
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?
+        .filter_map(|r| r.ok());
+    for (sid, mtime, blob) in rows {
+        if let Ok(insights) = serde_json::from_str(&blob) {
+            out.insert(
+                sid,
+                CachedInsights {
+                    source_mtime: mtime,
+                    insights,
+                },
+            );
+        }
+    }
+    Ok(out)
+}
+
+/// Insert or replace a cached insights row.
+pub fn save_insights(
+    conn: &Connection,
+    session_id: &str,
+    source: &str,
+    source_mtime: i64,
+    insights: &crate::insights::SessionInsights,
+) -> Result<()> {
+    let blob = serde_json::to_string(insights)?;
+    conn.execute(
+        "INSERT INTO insights (session_id, source, source_mtime, blob)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(session_id) DO UPDATE SET
+             source       = excluded.source,
+             source_mtime = excluded.source_mtime,
+             blob         = excluded.blob,
+             generated_at = strftime('%s','now')",
+        params![session_id, source, source_mtime, blob],
+    )?;
+    Ok(())
+}
+
+/// Read a setting as bool. Encoded as "1" / "0". Anything else → `default`.
+pub fn get_setting_bool(conn: &Connection, key: &str, default: bool) -> bool {
+    match get_setting(conn, key).as_deref() {
+        Some("1") => true,
+        Some("0") => false,
+        _ => default,
+    }
+}
+
+/// Persist a bool setting.
+pub fn set_setting_bool(conn: &Connection, key: &str, value: bool) -> Result<()> {
+    set_setting(conn, key, if value { "1" } else { "0" })
+}
+
+/// Delete a setting row, returning to the unset (`None`) state.
+pub fn clear_setting(conn: &Connection, key: &str) -> Result<()> {
+    conn.execute("DELETE FROM settings WHERE key = ?1", params![key])?;
     Ok(())
 }

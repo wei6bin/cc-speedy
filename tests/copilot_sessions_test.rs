@@ -1,6 +1,8 @@
-use cc_speedy::copilot_sessions::{parse_copilot_messages_from_path, list_copilot_sessions_from_dir};
-use tempfile::TempDir;
+use cc_speedy::copilot_sessions::{
+    list_copilot_sessions_from_dir, parse_copilot_messages_from_path,
+};
 use std::fs;
+use tempfile::TempDir;
 
 fn make_session(base: &TempDir, id: &str, yaml: &str, jsonl: &str) {
     let dir = base.path().join(id);
@@ -25,11 +27,15 @@ const THREE_MSGS: &str = concat!(
 #[test]
 fn test_list_sessions_filters_under_4_messages() {
     let tmp = TempDir::new().unwrap();
-    make_session(&tmp, "sess-a",
+    make_session(
+        &tmp,
+        "sess-a",
         "id: sess-a\ncwd: /home/user/proj\nupdated_at: 2026-01-01T00:00:00Z\n",
         THREE_MSGS,
     );
-    make_session(&tmp, "sess-b",
+    make_session(
+        &tmp,
+        "sess-b",
         "id: sess-b\ncwd: /home/user/proj2\nupdated_at: 2026-01-02T00:00:00Z\n",
         FOUR_MSGS,
     );
@@ -46,7 +52,9 @@ fn test_list_sessions_skips_dirs_without_workspace_yaml() {
     fs::create_dir_all(&legacy).unwrap();
     fs::write(legacy.join("events.jsonl"), FOUR_MSGS).unwrap();
     // Dir with workspace.yaml
-    make_session(&tmp, "valid-session",
+    make_session(
+        &tmp,
+        "valid-session",
         "id: valid-session\ncwd: /home/user/proj\nupdated_at: 2026-01-01T00:00:00Z\n",
         FOUR_MSGS,
     );
@@ -69,7 +77,9 @@ fn test_session_title_name_takes_priority_over_summary() {
 #[test]
 fn test_session_title_falls_back_to_summary() {
     let tmp = TempDir::new().unwrap();
-    make_session(&tmp, "sess-y",
+    make_session(
+        &tmp,
+        "sess-y",
         "id: sess-y\ncwd: /home/user/proj\nupdated_at: 2026-01-01T00:00:00Z\nsummary: my-summary\n",
         FOUR_MSGS,
     );
@@ -80,7 +90,9 @@ fn test_session_title_falls_back_to_summary() {
 #[test]
 fn test_session_git_branch_extracted() {
     let tmp = TempDir::new().unwrap();
-    make_session(&tmp, "sess-z",
+    make_session(
+        &tmp,
+        "sess-z",
         "id: sess-z\ncwd: /home/user/repo\nupdated_at: 2026-01-01T00:00:00Z\nbranch: feature-x\n",
         FOUR_MSGS,
     );
@@ -99,7 +111,9 @@ fn test_session_first_user_message_truncated_to_80_chars() {
          {{\"type\":\"assistant.message\",\"data\":{{\"content\":\"a2\"}}}}\n",
         long_msg
     );
-    make_session(&tmp, "sess-long",
+    make_session(
+        &tmp,
+        "sess-long",
         "id: sess-long\ncwd: /home/user/proj\nupdated_at: 2026-01-01T00:00:00Z\n",
         &jsonl,
     );
@@ -117,12 +131,16 @@ fn test_list_returns_empty_for_nonexistent_dir() {
 fn test_parse_messages_user_and_assistant() {
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("events.jsonl");
-    fs::write(&path, concat!(
-        "{\"type\":\"session.start\",\"data\":{}}\n",
-        "{\"type\":\"user.message\",\"data\":{\"content\":\"Hello\"}}\n",
-        "{\"type\":\"assistant.message\",\"data\":{\"content\":\"Hi there\"}}\n",
-        "{\"type\":\"tool.execution_start\",\"data\":{}}\n",
-    )).unwrap();
+    fs::write(
+        &path,
+        concat!(
+            "{\"type\":\"session.start\",\"data\":{}}\n",
+            "{\"type\":\"user.message\",\"data\":{\"content\":\"Hello\"}}\n",
+            "{\"type\":\"assistant.message\",\"data\":{\"content\":\"Hi there\"}}\n",
+            "{\"type\":\"tool.execution_start\",\"data\":{}}\n",
+        ),
+    )
+    .unwrap();
     let msgs = parse_copilot_messages_from_path(&path).unwrap();
     assert_eq!(msgs.len(), 2);
     assert_eq!(msgs[0].role, "user");
@@ -135,11 +153,15 @@ fn test_parse_messages_user_and_assistant() {
 fn test_parse_messages_skips_empty_assistant_content() {
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("events.jsonl");
-    fs::write(&path, concat!(
-        "{\"type\":\"user.message\",\"data\":{\"content\":\"query\"}}\n",
-        "{\"type\":\"assistant.message\",\"data\":{\"content\":\"\"}}\n",
-        "{\"type\":\"assistant.message\",\"data\":{\"content\":\"answer\"}}\n",
-    )).unwrap();
+    fs::write(
+        &path,
+        concat!(
+            "{\"type\":\"user.message\",\"data\":{\"content\":\"query\"}}\n",
+            "{\"type\":\"assistant.message\",\"data\":{\"content\":\"\"}}\n",
+            "{\"type\":\"assistant.message\",\"data\":{\"content\":\"answer\"}}\n",
+        ),
+    )
+    .unwrap();
     let msgs = parse_copilot_messages_from_path(&path).unwrap();
     assert_eq!(msgs.len(), 2);
     assert_eq!(msgs[1].text, "answer");
@@ -149,12 +171,16 @@ fn test_parse_messages_skips_empty_assistant_content() {
 fn test_parse_messages_skips_non_message_events() {
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("events.jsonl");
-    fs::write(&path, concat!(
-        "{\"type\":\"session.start\",\"data\":{}}\n",
-        "{\"type\":\"assistant.turn_start\",\"data\":{}}\n",
-        "{\"type\":\"user.message\",\"data\":{\"content\":\"only msg\"}}\n",
-        "{\"type\":\"tool.execution_complete\",\"data\":{}}\n",
-    )).unwrap();
+    fs::write(
+        &path,
+        concat!(
+            "{\"type\":\"session.start\",\"data\":{}}\n",
+            "{\"type\":\"assistant.turn_start\",\"data\":{}}\n",
+            "{\"type\":\"user.message\",\"data\":{\"content\":\"only msg\"}}\n",
+            "{\"type\":\"tool.execution_complete\",\"data\":{}}\n",
+        ),
+    )
+    .unwrap();
     let msgs = parse_copilot_messages_from_path(&path).unwrap();
     assert_eq!(msgs.len(), 1);
     assert_eq!(msgs[0].text, "only msg");

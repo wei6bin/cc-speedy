@@ -1,4 +1,4 @@
-use cc_speedy::tmux::{session_name_from_path, pin_window_title};
+use cc_speedy::tmux::{pin_window_title, session_name_from_path};
 
 #[test]
 fn test_session_name_from_path_two_segments() {
@@ -10,7 +10,12 @@ fn test_session_name_from_path_two_segments() {
 fn test_session_name_truncated_to_50_chars() {
     let long = "/a/b/c/d/e/f/g/h/i/j/k/l/m/n/this-is-a-very-long-project-name-that-exceeds-limits";
     let name = session_name_from_path(long);
-    assert!(name.len() <= 50, "session name was {} chars: {}", name.len(), name);
+    assert!(
+        name.len() <= 50,
+        "session name was {} chars: {}",
+        name.len(),
+        name
+    );
 }
 
 #[test]
@@ -39,7 +44,11 @@ fn test_is_inside_tmux_returns_bool() {
 #[test]
 fn test_pin_window_title_sets_and_locks_name() {
     // Skip if tmux is not available
-    if std::process::Command::new("tmux").arg("-V").output().is_err() {
+    if std::process::Command::new("tmux")
+        .arg("-V")
+        .output()
+        .is_err()
+    {
         eprintln!("tmux not found, skipping");
         return;
     }
@@ -54,7 +63,16 @@ fn test_pin_window_title_sets_and_locks_name() {
 
     // Create a detached session running sleep (not claude)
     let created = std::process::Command::new("tmux")
-        .args(["new-session", "-d", "-s", session, "-n", "initial", "sleep", "30"])
+        .args([
+            "new-session",
+            "-d",
+            "-s",
+            session,
+            "-n",
+            "initial",
+            "sleep",
+            "30",
+        ])
         .status()
         .expect("tmux new-session failed");
     assert!(created.success(), "Could not create test tmux session");
@@ -81,23 +99,43 @@ fn test_pin_window_title_sets_and_locks_name() {
         .args(["kill-session", "-t", session])
         .output();
 
-    assert_eq!(window_name, title, "window name should be '{}', got '{}'", title, window_name);
-    assert!(ar_value.contains("off"), "automatic-rename should be 'off', got '{}'", ar_value);
+    assert_eq!(
+        window_name, title,
+        "window name should be '{}', got '{}'",
+        title, window_name
+    );
+    assert!(
+        ar_value.contains("off"),
+        "automatic-rename should be 'off', got '{}'",
+        ar_value
+    );
 }
 
-use cc_speedy::tmux::{cc_session_name, oc_session_name, copilot_session_name};
+use cc_speedy::tmux::{cc_session_name, copilot_session_name, oc_session_name};
 
 #[test]
 fn test_cc_session_name_has_prefix() {
     let name = cc_session_name("/home/user/ai/myproj");
-    assert!(name.starts_with("cc-"), "expected cc- prefix, got: {}", name);
-    assert!(name.contains("ai"), "expected path segment in name: {}", name);
+    assert!(
+        name.starts_with("cc-"),
+        "expected cc- prefix, got: {}",
+        name
+    );
+    assert!(
+        name.contains("ai"),
+        "expected path segment in name: {}",
+        name
+    );
 }
 
 #[test]
 fn test_oc_session_name_has_prefix() {
     let name = oc_session_name("/home/user/ai/myproj");
-    assert!(name.starts_with("oc-"), "expected oc- prefix, got: {}", name);
+    assert!(
+        name.starts_with("oc-"),
+        "expected oc- prefix, got: {}",
+        name
+    );
 }
 
 #[test]
@@ -115,8 +153,16 @@ fn test_oc_session_name_max_50_chars() {
 #[test]
 fn test_copilot_session_name_has_co_prefix() {
     let name = copilot_session_name("/home/user/ai/myproj");
-    assert!(name.starts_with("co-"), "expected co- prefix, got: {}", name);
-    assert!(name.contains("ai"), "expected path segment in name: {}", name);
+    assert!(
+        name.starts_with("co-"),
+        "expected co- prefix, got: {}",
+        name
+    );
+    assert!(
+        name.contains("ai"),
+        "expected path segment in name: {}",
+        name
+    );
 }
 
 #[test]
@@ -124,4 +170,3 @@ fn test_copilot_session_name_max_50_chars() {
     let long = "/a/b/c/this-is-a-very-long-project-directory-name-that-exceeds-limits";
     assert!(copilot_session_name(long).len() <= 50);
 }
-

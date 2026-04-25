@@ -1,5 +1,5 @@
 use anyhow::Result;
-use cc_speedy::{summary, install, tui, update};
+use cc_speedy::{install, summary, tui, update};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -8,7 +8,12 @@ async fn main() -> Result<()> {
     // `copilot` — uses the user's default Claude subscription, not whatever
     // endpoint the parent shell pointed us at. Mirrors the intent of the
     // `alias claude='env -u ANTHROPIC_AUTH_TOKEN ... claude'` pattern.
-    for var in ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL", "ANTHROPIC_API_KEY"] {
+    for var in [
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_API_KEY",
+    ] {
         std::env::remove_var(var);
     }
 
@@ -19,8 +24,8 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Some("summarize") => summary::run_hook().await,
-        Some("install")   => install::run(),
-        Some("update")    => update::run().await,
-        _                 => tui::run().await,
+        Some("install") => install::run(),
+        Some("update") => update::run().await,
+        _ => tui::run().await,
     }
 }

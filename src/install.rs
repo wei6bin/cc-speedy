@@ -29,7 +29,10 @@ pub fn install_to(settings_path: &Path, binary_path: &str) -> Result<()> {
 
     // Build the entry first so the idempotency check uses the exact same command string
     let entry = build_hook_entry(binary_path);
-    let hook_cmd = entry["hooks"][0]["command"].as_str().unwrap_or("").to_string();
+    let hook_cmd = entry["hooks"][0]["command"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
 
     // Check if already installed — idempotent
     if let Some(existing) = settings["hooks"]["SessionEnd"].as_array() {
@@ -58,7 +61,10 @@ pub fn install_to(settings_path: &Path, binary_path: &str) -> Result<()> {
 
     let pretty = serde_json::to_string_pretty(&settings)?;
     std::fs::write(settings_path, pretty)?;
-    println!("cc-speedy: SessionEnd hook installed in {:?}", settings_path);
+    println!(
+        "cc-speedy: SessionEnd hook installed in {:?}",
+        settings_path
+    );
     Ok(())
 }
 

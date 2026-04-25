@@ -1,4 +1,4 @@
-use cc_speedy::store::{set_link, unset_link, load_all_links};
+use cc_speedy::store::{load_all_links, set_link, unset_link};
 
 fn open() -> rusqlite::Connection {
     let conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -9,7 +9,8 @@ fn open() -> rusqlite::Connection {
             linked_at         INTEGER NOT NULL DEFAULT (strftime('%s','now'))
          );
          CREATE INDEX idx_links_parent ON links (parent_session_id);",
-    ).unwrap();
+    )
+    .unwrap();
     conn
 }
 
@@ -51,7 +52,7 @@ fn test_unset_link_removes_row() {
 #[test]
 fn test_unset_link_noop_when_missing() {
     let conn = open();
-    unset_link(&conn, "never_linked").unwrap();  // should not panic
+    unset_link(&conn, "never_linked").unwrap(); // should not panic
     assert!(load_all_links(&conn).unwrap().is_empty());
 }
 
@@ -62,6 +63,10 @@ fn test_children_derivable_from_reverse_scan() {
     set_link(&conn, "c2", "p1").unwrap();
     set_link(&conn, "c3", "p2").unwrap();
     let map = load_all_links(&conn).unwrap();
-    let children_of_p1: Vec<&String> = map.iter().filter(|(_, pv)| pv == &"p1").map(|(k, _)| k).collect();
+    let children_of_p1: Vec<&String> = map
+        .iter()
+        .filter(|(_, pv)| pv == &"p1")
+        .map(|(k, _)| k)
+        .collect();
     assert_eq!(children_of_p1.len(), 2);
 }

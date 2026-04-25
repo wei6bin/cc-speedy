@@ -136,8 +136,16 @@ pub fn vault_is_running(vault: &str) -> bool {
         .output();
     match output {
         Ok(o) if o.status.success() => {
-            // CLI prints "=> <value>" — accept anything non-empty.
-            !String::from_utf8_lossy(&o.stdout).trim().is_empty()
+            // CLI prints "=> <value>" — extract the value from the last line and
+            // compare to the requested vault. Anything else is "wrong vault open"
+            // or "no vault open".
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            let last = stdout.lines().last().map(|l| l.trim()).unwrap_or("");
+            // Format is `=> "vault-name"` — strip the `=> ` prefix and the surrounding quotes.
+            last.strip_prefix("=> ")
+                .map(|s| s.trim_matches('"'))
+                .map(|name| name == vault)
+                .unwrap_or(false)
         }
         _ => false,
     }

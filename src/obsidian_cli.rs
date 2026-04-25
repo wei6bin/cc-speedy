@@ -95,13 +95,14 @@ pub fn daily_append(vault: &str, content: &str, dedupe_marker: Option<&str>) -> 
             .arg("eval")
             .arg(format!("code={}", escape_arg_value(&code)))
             .output()
-            .map_err(|_| Error::NotRunning)?;
+            .map_err(|_| Error::CliMissing)?;
         if !probe.status.success() {
             // Vault not open or eval failed — surface as NotRunning.
             return Err(Error::NotRunning);
         }
         let stdout = String::from_utf8_lossy(&probe.stdout);
-        if stdout.contains("=> true") {
+        let last = stdout.lines().last().map(|l| l.trim()).unwrap_or("");
+        if last == "=> true" {
             return Ok(()); // already there; nothing to do
         }
     }

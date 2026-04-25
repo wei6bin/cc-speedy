@@ -184,6 +184,16 @@ pub fn load_all_summaries(conn: &Connection) -> Result<HashMap<String, String>> 
     Ok(map)
 }
 
+/// Load the raw (factual-only) summary content for a single session.
+pub fn load_summary_content(conn: &Connection, session_id: &str) -> Option<String> {
+    conn.query_row(
+        "SELECT content FROM summaries WHERE session_id = ?1",
+        params![session_id],
+        |r| r.get::<_, String>(0),
+    )
+    .ok()
+}
+
 pub fn load_all_generated_at(conn: &Connection) -> Result<HashMap<String, i64>> {
     let mut stmt = conn.prepare("SELECT session_id, generated_at FROM summaries")?;
     let map = stmt

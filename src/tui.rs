@@ -22,7 +22,7 @@ use crate::theme;
 enum Focus { ActiveList, ArchivedList, Preview }
 
 #[derive(PartialEq)]
-enum AppMode { Normal, Filter, Grep, Rename, ActionMenu, Settings, Library, LibraryFilter, Projects, ProjectsFilter, TagEdit, LinkPicker, LinkPickerFilter, Digest }
+enum AppMode { Normal, Filter, Grep, Rename, ActionMenu, Settings, Library, LibraryFilter, Projects, ProjectsFilter, TagEdit, LinkPicker, LinkPickerFilter, Digest, Help }
 
 #[derive(PartialEq, Copy, Clone)]
 pub enum ProjectSort { LastActive, SessionCount, Alphabetical }
@@ -120,7 +120,7 @@ impl AppState {
         let tags_by_session = crate::store::load_all_tags(&conn).unwrap_or_default();
         let parent_of = crate::store::load_all_links(&conn).unwrap_or_default();
         let settings = crate::settings::load(&conn);
-        Ok(Self {
+        let mut state = Self {
             filtered_active: (0..n).collect(),
             filtered_archived: vec![],
             sessions,
@@ -166,7 +166,29 @@ impl AppState {
             settings_editing: false,
             settings_input: String::new(),
             settings_error: None,
-        })
+        };
+        // Split archived out of the active list on startup so the "all" view
+        // correctly shows archived sessions in the bottom-left panel.
+        state.apply_filter();
+        Ok(state)
+    }
+
+    /// Rebuild per-session haystacks for grep mode. Each haystack is lowercased
+    /// once so live keystrokes do O(N × len) substring checks with no allocs.
+    fn rebuild_grep_haystacks(&mut self) {
+        let summaries = self.summaries.lock().unwrap_or_else(|e| e.into_inner());
+        self.grep_haystacks = self
+            .sessions
+            .iter()
+            .map(|s| {
+                let summary_body = summaries.get(&s.session_id).map(|v| v.as_str()).unwrap_or("");
+                format!(
+                    "{}\n{}\n{}\n{}",
+                    s.summary, s.project_path, s.git_branch, summary_body,
+                )
+                .to_lowercase()
+            })
+            .collect();
     }
 
     /// Rebuild `link_picker_filtered` — every session except the currently
@@ -256,24 +278,6 @@ impl AppState {
         } else {
             self.library_list_state.select(Some(0));
         }
-    }
-
-    /// Rebuild per-session haystacks for grep mode. Each haystack is lowercased
-    /// once so live keystrokes do O(N × len) substring checks with no allocs.
-    fn rebuild_grep_haystacks(&mut self) {
-        let summaries = self.summaries.lock().unwrap_or_else(|e| e.into_inner());
-        self.grep_haystacks = self
-            .sessions
-            .iter()
-            .map(|s| {
-                let summary_body = summaries.get(&s.session_id).map(|v| v.as_str()).unwrap_or("");
-                format!(
-                    "{}\n{}\n{}\n{}",
-                    s.summary, s.project_path, s.git_branch, summary_body,
-                )
-                .to_lowercase()
-            })
-            .collect();
     }
 
     fn apply_filter(&mut self) {
@@ -540,7 +544,14 @@ async fn run_event_loop(
         maybe_refresh_selected_git(app);
         terminal.draw(|f| draw(f, app))?;
 
-        if event::poll(std::time::Duration::from_millis(200))? {
+        // Tick faster while a summary is generating so the spinner animates smoothly;
+        // idle redraws stay at 200ms to avoid wasted work.
+        let poll_ms = if app.generating.lock().map(|g| !g.is_empty()).unwrap_or(false) {
+            120
+        } else {
+            200
+        };
+        if event::poll(std::time::Duration::from_millis(poll_ms))? {
             if let Event::Key(key) = event::read()? {
                 match (&app.mode, key.modifiers, key.code) {
                     // --- Global ---
@@ -1159,6 +1170,12 @@ async fn run_event_loop(
                         }
                     }
 
+                    // o: save current summary + learnings to Obsidian (no regeneration)
+                    (AppMode::Normal, KeyModifiers::NONE, KeyCode::Char('o')) => {
+                        let msg = save_selected_to_obsidian(app);
+                        app.status_msg = Some((msg, Instant::now()));
+                    }
+
                     // c: copy summary to clipboard
                     (AppMode::Normal, KeyModifiers::NONE, KeyCode::Char('c')) => {
                         let content = build_preview_content(app);
@@ -1295,6 +1312,14 @@ async fn run_event_loop(
                             Ok(()) => return Ok(()),
                             Err(e) => app.status_msg = Some((format!("Launch failed: {e}"), Instant::now())),
                         }
+                        app.mode = AppMode::Normal;
+                    }
+
+                    // --- Help popup ---
+                    (AppMode::Normal, _, KeyCode::F(1)) => {
+                        app.mode = AppMode::Help;
+                    }
+                    (AppMode::Help, _, _) => {
                         app.mode = AppMode::Normal;
                     }
 
@@ -1561,11 +1586,12 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
             "  (j/k: scroll  e: export to Obsidian  Esc: exit)".to_string(),
             " Weekly Digest — last 7 days ",
         ),
+        AppMode::Help => ("".to_string(), " cc-speedy — Help "),
         AppMode::Normal => {
             let hint = if let Some(ref pp) = app.project_filter {
                 format!("  project: {}  (Esc to clear)", crate::util::path_last_n(pp, 2))
             } else if app.filter.is_empty() {
-                "  (press / to filter, ? to grep, L: library, P: projects)".to_string()
+                "  (F1: help  /: filter  ?: grep  L: library  P: projects)".to_string()
             } else {
                 format!("  filter: {}", app.filter)
             };
@@ -1620,6 +1646,7 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
     // pass a &HashMap without holding the mutex across both (would deadlock
     // with the background git-status writers).
     let git_cache = app.git_status.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let generating_set = app.generating.lock().unwrap_or_else(|e| e.into_inner()).clone();
 
     draw_list(
         f,
@@ -1628,6 +1655,7 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
         &app.pinned,
         &app.has_learnings,
         &git_cache,
+        &generating_set,
         &app.filtered_active,
         &mut app.list_state_active,
         "Sessions",
@@ -1642,6 +1670,7 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
             &app.pinned,
             &app.has_learnings,
             &git_cache,
+            &generating_set,
             &app.filtered_archived,
             &mut app.list_state_archived,
             "Archived",
@@ -1669,16 +1698,16 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
     }
 
     // Status bar: show timed flash message, or the key hint
+    const FOOTER_HINT: &str =
+        " F1: help   /: filter   ?: grep   Enter: resume   n: new   Tab: focus   j/k: move   q: quit";
     let (status_text, status_style) = if let Some((msg, at)) = &app.status_msg {
         if at.elapsed().as_secs() < 2 {
             (msg.as_str(), Style::default().fg(theme::STATUS_OK))
         } else {
-            (" 1:CC  2:OC  3:CO  0:all  /: filter (#tag)  ?: grep  L: library  P: projects  D: digest  Enter: resume  Ctrl+Y: yolo  Tab  j/k  r  c  x: actions  t: tag  l: link  u: unlink  a: archive  g: git  s: settings  Ctrl+R  q",
-             Style::default().fg(theme::STATUS_HELP))
+            (FOOTER_HINT, Style::default().fg(theme::STATUS_HELP))
         }
     } else {
-        (" 1:CC  2:OC  3:CO  0:all  /: filter (#tag)  ?: grep  L: library  P: projects  D: digest  Enter: resume  Ctrl+Y: yolo  Tab  j/k  r  c  x: actions  t: tag  l: link  u: unlink  a: archive  g: git  s: settings  Ctrl+R  q",
-         Style::default().fg(theme::STATUS_HELP))
+        (FOOTER_HINT, Style::default().fg(theme::STATUS_HELP))
     };
     f.render_widget(Paragraph::new(status_text).style(status_style), chunks[3]);
 
@@ -1688,6 +1717,9 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
     }
     if app.mode == AppMode::Settings {
         draw_settings_popup(f, app, area);
+    }
+    if app.mode == AppMode::Help {
+        draw_help_popup(f, area);
     }
 }
 
@@ -1869,12 +1901,14 @@ fn draw_list(
     pinned: &std::collections::HashSet<String>,
     has_learnings: &std::collections::HashSet<String>,
     git_cache: &std::collections::HashMap<String, (crate::git_status::GitStatus, Instant)>,
+    generating: &std::collections::HashSet<String>,
     indices: &[usize],
     list_state: &mut ListState,
     title: &str,
     focus: Focus,
     current_focus: Focus,
 ) {
+    let spinner = spinner_glyph();
     let items: Vec<ListItem> = indices
         .iter()
         .map(|&i| {
@@ -1891,7 +1925,9 @@ fn draw_list(
                 SessionSource::OpenCode   => ("[OC]", theme::OC_BADGE),
                 SessionSource::Copilot    => ("[CO]", theme::CO_BADGE),
             };
-            let pin_span = if pinned.contains(&s.session_id) {
+            let pin_span = if generating.contains(&s.session_id) {
+                Span::styled(format!("{} ", spinner), Style::default().fg(theme::JOBS_FG))
+            } else if pinned.contains(&s.session_id) {
                 Span::styled("* ", theme::pin_style())
             } else {
                 Span::raw("  ")
@@ -2205,6 +2241,68 @@ fn draw_pin_popup(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
     f.render_widget(popup, popup_area);
 }
 
+fn draw_help_popup(f: &mut ratatui::Frame, area: Rect) {
+    let popup_area = centered_rect(64, 24, area);
+    f.render_widget(Clear, popup_area);
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Navigation", theme::title_style()),
+        ]),
+        Line::from("    j / ↓        next session"),
+        Line::from("    k / ↑        previous session"),
+        Line::from("    Tab          toggle focus (active / archived / preview)"),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Source filter", theme::title_style()),
+        ]),
+        Line::from("    1            Claude Code only"),
+        Line::from("    2            OpenCode only"),
+        Line::from("    3            Copilot only"),
+        Line::from("    0            all sources"),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Sessions", theme::title_style()),
+        ]),
+        Line::from("    Enter        resume in tmux"),
+        Line::from("    n            new session in project"),
+        Line::from("    Ctrl+Y       resume in yolo (skip permissions)"),
+        Line::from("    Ctrl+N       new session in yolo"),
+        Line::from("    /            filter (project + title)"),
+        Line::from("    ?            cross-session grep (path, branch, summary, learnings)"),
+        Line::from("    r            rename"),
+        Line::from("    x            pin / unpin   |   a  archive / unarchive"),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Summary", theme::title_style()),
+        ]),
+        Line::from("    Ctrl+R       (re)generate summary + extract learnings"),
+        Line::from("    o            save current summary to Obsidian"),
+        Line::from("    c            copy summary to clipboard"),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  App", theme::title_style()),
+        ]),
+        Line::from("    s            settings   |   F1  this help   |   q  quit"),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  press any key to close", theme::dim_style()),
+        ]),
+    ];
+
+    let popup = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .border_type(theme::BORDER_TYPE)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme::BORDER_FOCUSED))
+                .title(Span::styled(" Keyboard shortcuts ", theme::title_style())),
+        )
+        .wrap(Wrap { trim: false });
+    f.render_widget(popup, popup_area);
+}
+
 fn draw_settings_popup(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
     let popup_area = centered_rect(70, 10, area);
     f.render_widget(Clear, popup_area);
@@ -2245,6 +2343,16 @@ fn draw_settings_popup(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
     f.render_widget(popup, popup_area);
 }
 
+/// Animated spinner glyph; frame advances roughly every 120ms based on wall clock.
+fn spinner_glyph() -> &'static str {
+    const FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    FRAMES[((ms / 120) as usize) % FRAMES.len()]
+}
+
 fn format_time(t: std::time::SystemTime) -> String {
     let secs = t
         .duration_since(std::time::UNIX_EPOCH)
@@ -2268,6 +2376,29 @@ fn truncate(s: &str, max: usize) -> String {
 fn window_title_from_session(s: &UnifiedSession) -> String {
     let label = if !s.summary.is_empty() { &s.summary } else { &s.project_name };
     truncate(label, 10)
+}
+
+/// Export the selected session's existing summary + learnings to Obsidian.
+/// Returns the status message to flash. Does not regenerate the summary.
+fn save_selected_to_obsidian(app: &AppState) -> String {
+    let Some(session) = app.selected_session().cloned() else {
+        return "No session selected".to_string();
+    };
+    let Some(vault_path) = app.settings.obsidian_kb_path.clone() else {
+        return "Obsidian path not set (press s to configure)".to_string();
+    };
+
+    let conn = app.db.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(factual) = crate::store::load_summary_content(&conn, &session.session_id) else {
+        return "No summary yet — press Ctrl+R to generate".to_string();
+    };
+    let learnings = crate::store::load_learnings(&conn, &session.session_id).unwrap_or_default();
+    drop(conn);
+
+    match crate::obsidian::export_to_obsidian(&session, &factual, &learnings, &vault_path) {
+        Ok(()) => "Saved to Obsidian".to_string(),
+        Err(e) => format!("Obsidian save failed: {}", e),
+    }
 }
 
 /// Copy text to the system clipboard.

@@ -2914,10 +2914,21 @@ fn save_selected_to_obsidian(app: &mut AppState) -> String {
             drop(conn);
             app.obsidian_synced.insert(session.session_id.clone());
 
-            match push_session_to_daily(&session, &factual, &app.settings) {
-                Ok(()) => "Saved to Obsidian".to_string(),
-                Err(why) => format!("Saved (daily push: {})", why),
-            }
+            // Daily push runs off the main thread to keep the TUI responsive
+            // (each CLI call costs 150–400 ms). Result is fire-and-forget;
+            // failures only log to stderr because the main "Saved to Obsidian"
+            // flash already confirmed the file write succeeded.
+            let push_session = session.clone();
+            let push_factual = factual.clone();
+            let push_settings = app.settings.clone();
+            tokio::task::spawn_blocking(move || {
+                if let Err(e) = push_session_to_daily(&push_session, &push_factual, &push_settings)
+                {
+                    eprintln!("cc-speedy: daily push failed: {}", e);
+                }
+            });
+
+            "Saved to Obsidian".to_string()
         }
         Err(e) => format!("Obsidian save failed: {}", e),
     }

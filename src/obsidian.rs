@@ -223,7 +223,7 @@ pub fn export_to_obsidian(
             yaml_dq_escape(&session.git_branch)
         ));
     }
-    front.push_str(&format!("last_exported: \"{}\"\n", last_exported));
+    front.push_str(&format!("last_exported: {}\n", last_exported));
     front.push_str("tags: [");
     for (i, t) in tags.iter().enumerate() {
         if i > 0 {

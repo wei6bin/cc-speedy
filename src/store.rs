@@ -62,9 +62,35 @@ pub fn open_db() -> Result<Connection> {
              parent_session_id TEXT NOT NULL,
              linked_at         INTEGER NOT NULL DEFAULT (strftime('%s','now'))
          );
-         CREATE INDEX IF NOT EXISTS idx_links_parent ON links (parent_session_id);",
+         CREATE INDEX IF NOT EXISTS idx_links_parent ON links (parent_session_id);
+         CREATE TABLE IF NOT EXISTS obsidian_synced (
+             session_id  TEXT PRIMARY KEY,
+             synced_at   INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+         );",
     )?;
     Ok(conn)
+}
+
+/// Mark a session as having been exported to Obsidian. Replaces any prior row
+/// so `synced_at` reflects the most recent successful export.
+pub fn mark_obsidian_synced(conn: &Connection, session_id: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO obsidian_synced (session_id, synced_at)
+         VALUES (?1, strftime('%s','now'))
+         ON CONFLICT(session_id) DO UPDATE SET synced_at = excluded.synced_at",
+        params![session_id],
+    )?;
+    Ok(())
+}
+
+/// Load the set of session IDs that have ever been exported to Obsidian.
+pub fn load_obsidian_synced(conn: &Connection) -> Result<HashSet<String>> {
+    let mut stmt = conn.prepare("SELECT session_id FROM obsidian_synced")?;
+    let set = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(set)
 }
 
 /// Link one session to a parent. Replaces any existing link. Refuses self-link.

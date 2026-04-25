@@ -6,7 +6,7 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::Style,
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
@@ -58,6 +58,7 @@ struct AppState {
     pinned: std::collections::HashSet<String>,
     archived: std::collections::HashSet<String>,
     has_learnings: std::collections::HashSet<String>,
+    obsidian_synced: std::collections::HashSet<String>,
     db: Arc<Mutex<rusqlite::Connection>>,
     /// Live git status per unique project_path. Populated by a startup batch
     /// and refreshed on selection change (30s stale) and manual `g`.
@@ -117,6 +118,7 @@ impl AppState {
         let pinned        = crate::store::load_pinned(&conn)?;
         let archived       = crate::store::load_all_archived(&conn)?;
         let has_learnings  = crate::store::load_sessions_with_learnings(&conn)?;
+        let obsidian_synced = crate::store::load_obsidian_synced(&conn).unwrap_or_default();
         let tags_by_session = crate::store::load_all_tags(&conn).unwrap_or_default();
         let parent_of = crate::store::load_all_links(&conn).unwrap_or_default();
         let settings = crate::settings::load(&conn);
@@ -141,6 +143,7 @@ impl AppState {
             pinned,
             archived,
             has_learnings,
+            obsidian_synced,
             db: Arc::new(Mutex::new(conn)),
             git_status: Arc::new(Mutex::new(std::collections::HashMap::new())),
             library_entries: Vec::new(),
@@ -1462,9 +1465,14 @@ fn spawn_summary_generation(
 
                     // 6. Export to Obsidian (non-fatal — failure only logs, never blocks display)
                     if let Some(ref vault_path) = obsidian_path {
-                        let _ = crate::obsidian::export_to_obsidian(
+                        if crate::obsidian::export_to_obsidian(
                             &session, &factual, &all_learnings, vault_path,
-                        );
+                        ).is_ok() {
+                            let _ = crate::store::mark_obsidian_synced(
+                                &db.lock().unwrap_or_else(|e| e.into_inner()),
+                                &id,
+                            );
+                        }
                     }
                 }
                 Err(e) => {
@@ -1654,6 +1662,7 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
         &app.sessions,
         &app.pinned,
         &app.has_learnings,
+        &app.obsidian_synced,
         &git_cache,
         &generating_set,
         &app.filtered_active,
@@ -1669,6 +1678,7 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
             &app.sessions,
             &app.pinned,
             &app.has_learnings,
+            &app.obsidian_synced,
             &git_cache,
             &generating_set,
             &app.filtered_archived,
@@ -1709,7 +1719,19 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
     } else {
         (FOOTER_HINT, Style::default().fg(theme::STATUS_HELP))
     };
-    f.render_widget(Paragraph::new(status_text).style(status_style), chunks[3]);
+    let version_text = concat!(" v", env!("CARGO_PKG_VERSION"), " ");
+    let version_w = version_text.chars().count() as u16;
+    let footer_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(0), Constraint::Length(version_w)])
+        .split(chunks[3]);
+    f.render_widget(Paragraph::new(status_text).style(status_style), footer_chunks[0]);
+    f.render_widget(
+        Paragraph::new(version_text)
+            .style(Style::default().fg(theme::STATUS_HELP))
+            .alignment(Alignment::Right),
+        footer_chunks[1],
+    );
 
     // Overlay popup for pin/unpin
     if app.mode == AppMode::ActionMenu {
@@ -1900,6 +1922,7 @@ fn draw_list(
     sessions: &[UnifiedSession],
     pinned: &std::collections::HashSet<String>,
     has_learnings: &std::collections::HashSet<String>,
+    obsidian_synced: &std::collections::HashSet<String>,
     git_cache: &std::collections::HashMap<String, (crate::git_status::GitStatus, Instant)>,
     generating: &std::collections::HashSet<String>,
     indices: &[usize],
@@ -1937,12 +1960,18 @@ fn draw_list(
             } else {
                 Span::raw("  ")
             };
+            let obs_span = if obsidian_synced.contains(&s.session_id) {
+                Span::styled("◆ ", Style::default().fg(theme::OBSIDIAN_PURPLE))
+            } else {
+                Span::raw("  ")
+            };
             let git_span = git_status_span(&s.project_path, git_cache);
             let line = Line::from(vec![
                 pin_span,
                 Span::styled(format!("{} ", dt), theme::dim_style()),
                 Span::styled(format!("{} ", badge_text), Style::default().fg(badge_color)),
                 kb_span,
+                obs_span,
                 git_span,
                 Span::styled(format!("{:<22}", label), Style::default().fg(theme::FG)),
                 Span::styled(format!("{:>4} ", s.message_count), theme::dim_style()),
@@ -2242,7 +2271,7 @@ fn draw_pin_popup(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
 }
 
 fn draw_help_popup(f: &mut ratatui::Frame, area: Rect) {
-    let popup_area = centered_rect(64, 24, area);
+    let popup_area = centered_rect(72, 34, area);
     f.render_widget(Clear, popup_area);
 
     let lines = vec![
@@ -2280,6 +2309,19 @@ fn draw_help_popup(f: &mut ratatui::Frame, area: Rect) {
         Line::from("    Ctrl+R       (re)generate summary + extract learnings"),
         Line::from("    o            save current summary to Obsidian"),
         Line::from("    c            copy summary to clipboard"),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Row glyphs", theme::title_style()),
+        ]),
+        Line::from(vec![
+            Span::raw("    "),
+            Span::styled("*", theme::pin_style()),
+            Span::raw("  pinned    "),
+            Span::styled("✓", Style::default().fg(theme::TITLE)),
+            Span::raw("  has learnings    "),
+            Span::styled("◆", Style::default().fg(theme::OBSIDIAN_PURPLE)),
+            Span::raw("  synced to Obsidian"),
+        ]),
         Line::from(""),
         Line::from(vec![
             Span::styled("  App", theme::title_style()),
@@ -2380,7 +2422,9 @@ fn window_title_from_session(s: &UnifiedSession) -> String {
 
 /// Export the selected session's existing summary + learnings to Obsidian.
 /// Returns the status message to flash. Does not regenerate the summary.
-fn save_selected_to_obsidian(app: &AppState) -> String {
+/// On success also persists the sync to SQLite and updates the in-memory set
+/// so the row glyph appears immediately.
+fn save_selected_to_obsidian(app: &mut AppState) -> String {
     let Some(session) = app.selected_session().cloned() else {
         return "No session selected".to_string();
     };
@@ -2388,15 +2432,24 @@ fn save_selected_to_obsidian(app: &AppState) -> String {
         return "Obsidian path not set (press s to configure)".to_string();
     };
 
-    let conn = app.db.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(factual) = crate::store::load_summary_content(&conn, &session.session_id) else {
+    let (factual_opt, learnings) = {
+        let conn = app.db.lock().unwrap_or_else(|e| e.into_inner());
+        let factual = crate::store::load_summary_content(&conn, &session.session_id);
+        let learnings = crate::store::load_learnings(&conn, &session.session_id).unwrap_or_default();
+        (factual, learnings)
+    };
+    let Some(factual) = factual_opt else {
         return "No summary yet — press Ctrl+R to generate".to_string();
     };
-    let learnings = crate::store::load_learnings(&conn, &session.session_id).unwrap_or_default();
-    drop(conn);
 
     match crate::obsidian::export_to_obsidian(&session, &factual, &learnings, &vault_path) {
-        Ok(()) => "Saved to Obsidian".to_string(),
+        Ok(()) => {
+            let conn = app.db.lock().unwrap_or_else(|e| e.into_inner());
+            let _ = crate::store::mark_obsidian_synced(&conn, &session.session_id);
+            drop(conn);
+            app.obsidian_synced.insert(session.session_id.clone());
+            "Saved to Obsidian".to_string()
+        }
         Err(e) => format!("Obsidian save failed: {}", e),
     }
 }

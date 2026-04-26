@@ -737,13 +737,14 @@ fn block_copy_text(b: &crate::turn_detail::DetailBlock) -> String {
 }
 
 /// Background insights loader: parse the JSONL, persist to SQLite, update cache.
-/// No-op for non-CC sessions, missing paths, or sessions already being parsed
+/// No-op for OC sessions, missing paths, or sessions already being parsed
 /// or already cached at the current source mtime.
 fn maybe_spawn_insights_load(app: &AppState) {
     let Some(s) = app.selected_session() else {
         return;
     };
-    if s.source != SessionSource::ClaudeCode {
+    let source = s.source.clone();
+    if matches!(source, SessionSource::OpenCode) {
         return;
     }
     let Some(jsonl) = s.jsonl_path.clone() else {
@@ -751,7 +752,6 @@ fn maybe_spawn_insights_load(app: &AppState) {
     };
     let session_id = s.session_id.clone();
 
-    // Live mtime of the JSONL.
     let live_mtime = match std::fs::metadata(&jsonl).and_then(|m| m.modified()) {
         Ok(t) => t
             .duration_since(std::time::UNIX_EPOCH)
@@ -760,9 +760,6 @@ fn maybe_spawn_insights_load(app: &AppState) {
         Err(_) => return,
     };
 
-    // Skip if cache is fresh AND has a populated turns vector. The turns check
-    // forces a re-parse for Phase 1 cached rows that were stored before glyphs
-    // existed (rows where assistant_turns > 0 but turns is empty).
     {
         let cache = app.insights_cache.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(c) = cache.get(&session_id) {
@@ -772,7 +769,6 @@ fn maybe_spawn_insights_load(app: &AppState) {
             }
         }
     }
-    // Guard against duplicate spawns.
     {
         let mut loading = app
             .insights_loading
@@ -786,15 +782,31 @@ fn maybe_spawn_insights_load(app: &AppState) {
     let cache = app.insights_cache.clone();
     let loading = app.insights_loading.clone();
     let db = app.db.clone();
+    let source_label = match source {
+        SessionSource::ClaudeCode => "cc",
+        SessionSource::Copilot => "copilot",
+        SessionSource::OpenCode => unreachable!("filtered above"),
+    };
 
     tokio::task::spawn_blocking(move || {
-        let parsed = crate::insights::parse_insights(std::path::Path::new(&jsonl));
+        let parsed = match source {
+            SessionSource::ClaudeCode => {
+                crate::insights::parse_insights(std::path::Path::new(&jsonl))
+            }
+            SessionSource::Copilot => {
+                crate::copilot_insights::parse_insights(std::path::Path::new(&jsonl))
+            }
+            SessionSource::OpenCode => unreachable!(),
+        };
         if let Ok(insights) = parsed {
-            // Persist before updating in-memory cache so a crash mid-update
-            // doesn't leave the cache "ahead" of the DB.
             if let Ok(conn) = db.lock() {
-                let _ =
-                    crate::store::save_insights(&conn, &session_id, "cc", live_mtime, &insights);
+                let _ = crate::store::save_insights(
+                    &conn,
+                    &session_id,
+                    source_label,
+                    live_mtime,
+                    &insights,
+                );
             }
             cache.lock().unwrap_or_else(|e| e.into_inner()).insert(
                 session_id.clone(),
@@ -2420,11 +2432,11 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
         }
 
         // Decide whether the right pane shows Insights above Summary.
-        // Only CC sessions get insights (OC/Copilot have no parser yet).
+        // CC and Copilot sessions both have parsers; OC does not.
         let show_insights = app.insights_visible
             && app
                 .selected_session()
-                .map(|s| s.source == SessionSource::ClaudeCode)
+                .map(|s| !matches!(s.source, SessionSource::OpenCode))
                 .unwrap_or(false);
 
         if show_insights {

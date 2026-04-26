@@ -43,6 +43,11 @@ fn tool_histogram_excludes_report_intent() {
     let i = parse_insights_from_str(HISTOGRAM);
     let names: Vec<&str> = i.tool_counts.iter().map(|(n, _, _)| n.as_str()).collect();
     assert!(!names.contains(&"report_intent"));
+    assert_eq!(
+        i.tool_counts.len(),
+        2,
+        "only bash + view should be in histogram"
+    );
     // bash appears twice, view once. Sorted by count desc then alpha asc.
     assert_eq!(i.tool_counts[0], ("bash".to_string(), 2, 1));
     assert_eq!(i.tool_counts[1], ("view".to_string(), 1, 0));
@@ -108,7 +113,7 @@ fn glyph_priority_task_over_tool() {
     let i = parse_insights_from_str(PRIORITY);
     assert!(matches!(i.turns[0].category, GlyphCategory::Task));
     assert_eq!(i.turns[0].glyph, 'A');
-    assert!(i.turns[0].label.starts_with("Agent → explorer"));
+    assert_eq!(i.turns[0].label, "Agent → explorer");
 }
 
 #[test]

@@ -107,3 +107,45 @@ fn parallel_tool_completions_pair_by_id() {
     // Block order matches toolRequests order: A, B, C.
     assert_eq!(outputs, vec!["out-a", "out-b", "out-c"]);
 }
+
+const FAILED_TOOL: &str = r#"{"type":"user.message","data":{"content":"try it"},"id":"u1","timestamp":"2026-04-26T10:00:00Z"}
+{"type":"assistant.turn_start","data":{"turnId":"0"},"id":"e1","timestamp":"2026-04-26T10:00:01Z"}
+{"type":"assistant.message","data":{"content":"","toolRequests":[{"toolCallId":"f1","name":"bash","arguments":{"cmd":"missing"},"type":"function"}],"reasoningText":"running","outputTokens":3},"id":"e2","timestamp":"2026-04-26T10:00:02Z"}
+{"type":"tool.execution_complete","data":{"toolCallId":"f1","model":"claude-sonnet-4.6","success":false,"result":{}},"id":"e3","timestamp":"2026-04-26T10:00:03Z"}
+{"type":"assistant.turn_end","data":{"turnId":"0"},"id":"e4","timestamp":"2026-04-26T10:00:04Z"}
+"#;
+
+#[test]
+fn failed_tool_marked_as_error() {
+    let t = extract_turn_from_str(FAILED_TOOL, 0).unwrap();
+    let tool = t
+        .blocks
+        .iter()
+        .find_map(|b| match b {
+            DetailBlock::Tool { result, .. } => result.as_ref(),
+            _ => None,
+        })
+        .expect("tool block with result");
+    assert!(tool.is_error);
+    assert_eq!(tool.content, "");
+    assert_eq!(tool.original_bytes, 0);
+    assert!(!tool.truncated);
+}
+
+const REDACTED: &str = r#"{"type":"user.message","data":{"content":"think"},"id":"u1","timestamp":"2026-04-26T10:00:00Z"}
+{"type":"assistant.turn_start","data":{"turnId":"0"},"id":"e1","timestamp":"2026-04-26T10:00:01Z"}
+{"type":"assistant.message","data":{"content":"ok","toolRequests":[],"reasoningText":"","reasoningOpaque":"OPAQUE_BLOB","outputTokens":2},"id":"e2","timestamp":"2026-04-26T10:00:02Z"}
+{"type":"assistant.turn_end","data":{"turnId":"0"},"id":"e3","timestamp":"2026-04-26T10:00:03Z"}
+"#;
+
+#[test]
+fn redacted_thinking_block() {
+    let t = extract_turn_from_str(REDACTED, 0).unwrap();
+    match &t.blocks[0] {
+        DetailBlock::Thinking { text, redacted } => {
+            assert!(text.is_empty());
+            assert!(*redacted);
+        }
+        other => panic!("expected redacted Thinking, got {:?}", other),
+    }
+}

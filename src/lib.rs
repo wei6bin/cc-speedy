@@ -1,4 +1,6 @@
+pub mod copilot_insights;
 pub mod copilot_sessions;
+pub mod copilot_turn_detail;
 pub mod digest;
 pub mod git_status;
 pub mod insights;

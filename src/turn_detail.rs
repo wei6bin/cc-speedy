@@ -300,7 +300,7 @@ fn stringify_user_content(v: &Value) -> String {
 
 /// Truncate `s` to at most `max_bytes`, but never split a UTF-8 codepoint.
 /// Caller should set `truncated: true` if the returned len differs from s.len().
-fn truncate_at_char_boundary(s: &str, max_bytes: usize) -> String {
+pub(crate) fn truncate_at_char_boundary(s: &str, max_bytes: usize) -> String {
     if s.len() <= max_bytes {
         return s.to_string();
     }

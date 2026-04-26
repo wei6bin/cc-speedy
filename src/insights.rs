@@ -355,7 +355,7 @@ pub fn tool_to_glyph(name: &str) -> char {
     }
 }
 
-fn increment_tool(
+pub(crate) fn increment_tool(
     counts: &mut Vec<(String, u32, u32)>,
     idx: &mut std::collections::HashMap<String, usize>,
     name: &str,
@@ -368,7 +368,7 @@ fn increment_tool(
     }
 }
 
-fn bump_error(
+pub(crate) fn bump_error(
     counts: &mut [(String, u32, u32)],
     idx: &std::collections::HashMap<String, usize>,
     name: &str,

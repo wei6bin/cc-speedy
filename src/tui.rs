@@ -2664,6 +2664,16 @@ fn draw_projects(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
             } else {
                 String::new()
             };
+            let learnings_str = if p.learnings_count > 0 {
+                format!("📝{} ", p.learnings_count)
+            } else {
+                "    ".to_string()
+            };
+            let pending_str = if p.pending_count > 0 {
+                format!("⏳{} ", p.pending_count)
+            } else {
+                "    ".to_string()
+            };
             Line::from(vec![
                 Span::styled(format!("{} ", glyph), Style::default().fg(gcolor)),
                 Span::styled(
@@ -2675,6 +2685,8 @@ fn draw_projects(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
                     Style::default().fg(theme::FG),
                 ),
                 Span::styled(format!("{:>4} ", p.session_count), theme::dim_style()),
+                Span::styled(learnings_str, theme::dim_style()),
+                Span::styled(pending_str, theme::dim_style()),
                 Span::styled(
                     format!("last: {}", format_time(p.last_active)),
                     theme::dim_style(),

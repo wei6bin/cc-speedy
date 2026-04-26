@@ -1560,6 +1560,22 @@ async fn run_event_loop(
                         app.source_filter = None;
                         app.apply_filter();
                     }
+                    (AppMode::Projects, KeyModifiers::NONE, KeyCode::Char('1')) => {
+                        app.source_filter = Some(SessionSource::ClaudeCode);
+                        app.rebuild_projects();
+                    }
+                    (AppMode::Projects, KeyModifiers::NONE, KeyCode::Char('2')) => {
+                        app.source_filter = Some(SessionSource::OpenCode);
+                        app.rebuild_projects();
+                    }
+                    (AppMode::Projects, KeyModifiers::NONE, KeyCode::Char('3')) => {
+                        app.source_filter = Some(SessionSource::Copilot);
+                        app.rebuild_projects();
+                    }
+                    (AppMode::Projects, KeyModifiers::NONE, KeyCode::Char('0')) => {
+                        app.source_filter = None;
+                        app.rebuild_projects();
+                    }
 
                     (AppMode::Normal, _, KeyCode::Enter) | (AppMode::Grep, _, KeyCode::Enter) => {
                         // Intercept Enter when the Insights timeline cursor is

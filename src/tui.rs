@@ -918,6 +918,11 @@ async fn run_event_loop(
                     // --- Global ---
                     (_, KeyModifiers::CONTROL, KeyCode::Char('c')) => break,
                     (AppMode::Normal, _, KeyCode::Char('q')) => break,
+                    (AppMode::Normal, _, KeyCode::Left) => {
+                        app.project_filter = None;
+                        app.mode = AppMode::Projects;
+                        app.rebuild_projects();
+                    }
 
                     // Esc in Normal clears the project filter (if any). `q` still quits.
                     (AppMode::Normal, _, KeyCode::Esc) if app.project_filter.is_some() => {
@@ -1132,9 +1137,10 @@ async fn run_event_loop(
 
                     // --- Project Dashboard mode ---
                     (AppMode::Normal, _, KeyCode::Char('P')) => {
+                        app.project_filter = None;
                         app.projects_filter.clear();
-                        app.rebuild_projects();
                         app.mode = AppMode::Projects;
+                        app.rebuild_projects();
                     }
                     (AppMode::Projects, _, KeyCode::Esc) => {
                         app.mode = AppMode::Normal;

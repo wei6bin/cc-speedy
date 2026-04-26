@@ -51,3 +51,33 @@ fn turn_0_basic_extraction() {
     }
     let _ = RESULT_BYTE_CAP;
 }
+
+const MULTI_ROUND: &str = r#"{"type":"user.message","data":{"content":"refactor X"},"id":"u1","timestamp":"2026-04-26T10:00:00Z"}
+{"type":"assistant.turn_start","data":{"turnId":"0"},"id":"e1","timestamp":"2026-04-26T10:00:01Z"}
+{"type":"assistant.message","data":{"content":"","toolRequests":[{"toolCallId":"a1","name":"view","arguments":{"path":"/x"},"type":"function"}],"reasoningText":"Look at X first.","outputTokens":10},"id":"e2","timestamp":"2026-04-26T10:00:02Z"}
+{"type":"tool.execution_complete","data":{"toolCallId":"a1","model":"claude-sonnet-4.6","success":true,"result":{"content":"X contents","detailedContent":"X contents"}},"id":"e3","timestamp":"2026-04-26T10:00:03Z"}
+{"type":"assistant.message","data":{"content":"","toolRequests":[{"toolCallId":"b1","name":"edit","arguments":{"path":"/x","new":"Y"},"type":"function"}],"reasoningText":"Now edit it.","outputTokens":15},"id":"e4","timestamp":"2026-04-26T10:00:04Z"}
+{"type":"tool.execution_complete","data":{"toolCallId":"b1","model":"claude-sonnet-4.6","success":true,"result":{"content":"ok","detailedContent":"ok"}},"id":"e5","timestamp":"2026-04-26T10:00:05Z"}
+{"type":"assistant.message","data":{"content":"Done.","toolRequests":[],"reasoningText":"","outputTokens":4},"id":"e6","timestamp":"2026-04-26T10:00:06Z"}
+{"type":"assistant.turn_end","data":{"turnId":"0"},"id":"e7","timestamp":"2026-04-26T10:00:07Z"}
+"#;
+
+#[test]
+fn multi_round_turn_carries_originating_user_msg() {
+    for idx in 0..3u32 {
+        let t = extract_turn_from_str(MULTI_ROUND, idx).unwrap();
+        assert_eq!(
+            t.user_msg.as_deref(),
+            Some("refactor X"),
+            "round {} should keep the originating prompt",
+            idx
+        );
+        assert_eq!(t.turn_idx, idx);
+    }
+    let final_round = extract_turn_from_str(MULTI_ROUND, 2).unwrap();
+    assert_eq!(final_round.blocks.len(), 1);
+    match &final_round.blocks[0] {
+        DetailBlock::Text { text } => assert_eq!(text, "Done."),
+        other => panic!("expected Text, got {:?}", other),
+    }
+}

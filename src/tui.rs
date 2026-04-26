@@ -197,7 +197,7 @@ impl AppState {
             filter: String::new(),
             grep_query: String::new(),
             grep_haystacks: Vec::new(),
-            mode: AppMode::Normal,
+            mode: AppMode::Projects,
             rename_input: String::new(),
             summaries: Arc::new(Mutex::new(summaries_map)),
             summary_generated_at: Arc::new(Mutex::new(generated_at)),
@@ -249,6 +249,7 @@ impl AppState {
         // Split archived out of the active list on startup so the "all" view
         // correctly shows archived sessions in the bottom-left panel.
         state.apply_filter();
+        state.rebuild_projects();
         Ok(state)
     }
 

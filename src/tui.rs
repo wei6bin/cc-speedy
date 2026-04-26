@@ -646,7 +646,20 @@ fn open_turn_detail(app: &mut AppState) {
     let Some(jsonl) = s.jsonl_path.clone() else {
         return;
     };
-    match crate::turn_detail::extract_turn(std::path::Path::new(&jsonl), turn_idx as u32) {
+    let source = s.source.clone();
+    let path = std::path::Path::new(&jsonl);
+    let extracted = match source {
+        SessionSource::ClaudeCode => crate::turn_detail::extract_turn(path, turn_idx as u32),
+        SessionSource::Copilot => crate::copilot_turn_detail::extract_turn(path, turn_idx as u32),
+        SessionSource::OpenCode => {
+            app.status_msg = Some((
+                "turn detail not supported for OpenCode sessions yet".to_string(),
+                Instant::now(),
+            ));
+            return;
+        }
+    };
+    match extracted {
         Ok(td) => {
             app.turn_detail_expanded = default_expansion(&td.blocks);
             app.turn_detail_focused = 0;
@@ -1506,7 +1519,12 @@ async fn run_event_loop(
                             && app.glyph_cursor.is_some()
                             && app
                                 .selected_session()
-                                .map(|s| s.source == SessionSource::ClaudeCode)
+                                .map(|s| {
+                                    matches!(
+                                        s.source,
+                                        SessionSource::ClaudeCode | SessionSource::Copilot
+                                    )
+                                })
                                 .unwrap_or(false);
                         if want_detail {
                             open_turn_detail(app);
@@ -3384,6 +3402,11 @@ fn draw_turn_detail(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
         return;
     };
 
+    let glyph_for_tool: fn(&str) -> char = match app.selected_session().map(|s| s.source.clone()) {
+        Some(SessionSource::Copilot) => crate::copilot_insights::tool_to_glyph,
+        _ => crate::insights::tool_to_glyph,
+    };
+
     let modal_w = area.width.saturating_sub(4).max(40);
     let modal_h = area.height.saturating_sub(2).max(10);
     let modal = centered_rect(modal_w, modal_h, area);
@@ -3527,7 +3550,7 @@ fn draw_turn_detail(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
                 input_pretty,
                 result,
             } => {
-                let glyph = crate::insights::tool_to_glyph(name);
+                let glyph = glyph_for_tool(name);
                 let header = format!("{}{} {} {}", focus_prefix, chevron, glyph, name);
                 lines.push(Line::from(Span::styled(
                     header,

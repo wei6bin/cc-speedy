@@ -1828,7 +1828,9 @@ async fn run_event_loop(
                                             SessionSource::Copilot => {
                                                 crate::copilot_turn_detail::extract_turn(path, next)
                                             }
-                                            SessionSource::OpenCode => return Ok(()), // unreachable: TurnDetail mode is gated to CC/Copilot
+                                            SessionSource::OpenCode => unreachable!(
+                                                "TurnDetail mode is gated to CC/Copilot"
+                                            ),
                                         };
                                         if let Ok(new_td) = result {
                                             app.glyph_cursor = Some(next as usize);

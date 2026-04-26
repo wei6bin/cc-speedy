@@ -168,6 +168,16 @@ fn subagent_messages_excluded_from_index() {
     assert!(matches!(t0.blocks.last().unwrap(),
         DetailBlock::Tool { name, .. } if name == "task"));
 
+    // The task tool's result must be paired even though sub-agent
+    // assistant.message events sit between the call and the completion.
+    if let Some(DetailBlock::Tool { result, .. }) = t0.blocks.last() {
+        let r = result.as_ref().expect("task tool result should be paired");
+        assert!(!r.is_error);
+        assert_eq!(r.content, "sub-result");
+    } else {
+        panic!("expected last block to be a Tool");
+    }
+
     let t1 = extract_turn_from_str(SUBAGENT, 1).unwrap();
     assert_eq!(t1.blocks.len(), 1);
     match &t1.blocks[0] {

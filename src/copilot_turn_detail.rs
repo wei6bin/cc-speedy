@@ -47,7 +47,15 @@ pub fn extract_turn_from_str(content: &str, turn_idx: u32) -> Result<TurnDetail>
         // Forward scan: target is captured, walk until next message boundary.
         if let Some(td) = target.as_mut() {
             match kind {
-                "assistant.message" | "assistant.turn_end" | "user.message" => break,
+                "assistant.turn_end" | "user.message" => break,
+                "assistant.message" => {
+                    // Sub-agent rounds (parentToolCallId set) are emitted between a
+                    // `task` call and its tool.execution_complete; skipping them lets
+                    // us pair the task result. Main-thread messages start the next turn.
+                    if !v["data"]["parentToolCallId"].is_string() {
+                        break;
+                    }
+                }
                 "tool.execution_complete" => {
                     let id = v["data"]["toolCallId"].as_str().unwrap_or("");
                     if let Some(&block_idx) = id_to_block_idx.get(id) {

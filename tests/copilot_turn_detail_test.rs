@@ -111,7 +111,7 @@ fn parallel_tool_completions_pair_by_id() {
 const FAILED_TOOL: &str = r#"{"type":"user.message","data":{"content":"try it"},"id":"u1","timestamp":"2026-04-26T10:00:00Z"}
 {"type":"assistant.turn_start","data":{"turnId":"0"},"id":"e1","timestamp":"2026-04-26T10:00:01Z"}
 {"type":"assistant.message","data":{"content":"","toolRequests":[{"toolCallId":"f1","name":"bash","arguments":{"cmd":"missing"},"type":"function"}],"reasoningText":"running","outputTokens":3},"id":"e2","timestamp":"2026-04-26T10:00:02Z"}
-{"type":"tool.execution_complete","data":{"toolCallId":"f1","model":"claude-sonnet-4.6","success":false,"result":{}},"id":"e3","timestamp":"2026-04-26T10:00:03Z"}
+{"type":"tool.execution_complete","data":{"toolCallId":"f1","model":"claude-sonnet-4.6","success":false,"result":null},"id":"e3","timestamp":"2026-04-26T10:00:03Z"}
 {"type":"assistant.turn_end","data":{"turnId":"0"},"id":"e4","timestamp":"2026-04-26T10:00:04Z"}
 "#;
 
@@ -181,8 +181,10 @@ fn subagent_messages_excluded_from_index() {
 
 #[test]
 fn large_result_truncated_at_char_boundary() {
-    // Build a fixture whose detailedContent is well past RESULT_BYTE_CAP.
-    let huge = "a".repeat(RESULT_BYTE_CAP * 2);
+    // 4-byte char "🦀" (U+1F980). Add a leading "a" so the byte at index
+    // RESULT_BYTE_CAP lands mid-char and forces the truncator to walk back to
+    // the previous char boundary. Pure-ASCII fixtures wouldn't exercise this.
+    let huge = format!("a{}", "🦀".repeat(RESULT_BYTE_CAP));
     let fixture = format!(
         r#"{{"type":"user.message","data":{{"content":"big"}},"id":"u1","timestamp":"2026-04-26T10:00:00Z"}}
 {{"type":"assistant.turn_start","data":{{"turnId":"0"}},"id":"e1","timestamp":"2026-04-26T10:00:01Z"}}
@@ -203,6 +205,16 @@ fn large_result_truncated_at_char_boundary() {
         .unwrap();
     assert!(r.truncated);
     assert!(r.content.len() <= RESULT_BYTE_CAP);
+    // Walkback for a 4-byte char is at most 3 bytes; longer would mean the
+    // truncator walked too far.
+    assert!(
+        r.content.len() >= RESULT_BYTE_CAP - 3,
+        "walked back too far: got {}",
+        r.content.len()
+    );
+    // Truncated content must be a valid UTF-8 prefix of the original — would
+    // panic in `r.content.len()` slice if it weren't a char boundary.
+    assert_eq!(&huge[..r.content.len()], r.content);
     assert_eq!(r.original_bytes, huge.len());
 }
 

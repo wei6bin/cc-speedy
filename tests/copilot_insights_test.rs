@@ -55,3 +55,35 @@ fn tool_errors_counts_failed_completions() {
     // The owning glyph (turn 0) should have has_error set.
     assert!(i.turns[0].has_error);
 }
+
+const TASKS: &str = r#"{"type":"user.message","data":{"content":"delegate twice"},"id":"u1","timestamp":"2026-04-26T10:00:00Z"}
+{"type":"assistant.turn_start","data":{"turnId":"0"},"id":"e1","timestamp":"2026-04-26T10:00:01Z"}
+{"type":"assistant.message","data":{"content":"","toolRequests":[{"toolCallId":"t1","name":"task","arguments":{"agent_type":"explorer","prompt":"look around"},"type":"function"}],"reasoningText":"","outputTokens":1},"id":"e2","timestamp":"2026-04-26T10:00:02Z"}
+{"type":"tool.execution_complete","data":{"toolCallId":"t1","model":"claude-sonnet-4.6","success":true,"result":{"content":"","detailedContent":"done"}},"id":"e3","timestamp":"2026-04-26T10:00:03Z"}
+{"type":"assistant.message","data":{"content":"","toolRequests":[{"toolCallId":"t2","name":"task","arguments":{"agent_type":"explorer","prompt":"again"},"type":"function"},{"toolCallId":"t3","name":"task","arguments":{"agent_type":"reviewer","prompt":"review"},"type":"function"}],"reasoningText":"","outputTokens":1},"id":"e4","timestamp":"2026-04-26T10:00:04Z"}
+{"type":"tool.execution_complete","data":{"toolCallId":"t2","model":"claude-sonnet-4.6","success":true,"result":{"content":"","detailedContent":"done"}},"id":"e5","timestamp":"2026-04-26T10:00:05Z"}
+{"type":"tool.execution_complete","data":{"toolCallId":"t3","model":"claude-sonnet-4.6","success":true,"result":{"content":"","detailedContent":"done"}},"id":"e6","timestamp":"2026-04-26T10:00:06Z"}
+{"type":"assistant.turn_end","data":{"turnId":"0"},"id":"e7","timestamp":"2026-04-26T10:00:07Z"}
+"#;
+
+#[test]
+fn tasks_populated_dedup_first_occurrence_order() {
+    let i = parse_insights_from_str(TASKS);
+    assert_eq!(
+        i.tasks,
+        vec!["explorer".to_string(), "reviewer".to_string()]
+    );
+}
+
+#[test]
+fn skills_empty_for_copilot() {
+    let i = parse_insights_from_str(TASKS);
+    assert!(i.skills.is_empty());
+}
+
+#[test]
+fn model_picked_up_from_tool_complete() {
+    // BASICS has no session.model_change; model must come from tool.execution_complete.
+    let i = parse_insights_from_str(BASICS);
+    assert_eq!(i.model, "claude-sonnet-4.6");
+}

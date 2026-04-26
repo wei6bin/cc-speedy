@@ -81,3 +81,29 @@ fn multi_round_turn_carries_originating_user_msg() {
         other => panic!("expected Text, got {:?}", other),
     }
 }
+
+const PARALLEL: &str = r#"{"type":"user.message","data":{"content":"do three things"},"id":"u1","timestamp":"2026-04-26T10:00:00Z"}
+{"type":"assistant.turn_start","data":{"turnId":"0"},"id":"e1","timestamp":"2026-04-26T10:00:01Z"}
+{"type":"assistant.message","data":{"content":"","toolRequests":[{"toolCallId":"A","name":"bash","arguments":{"cmd":"a"},"type":"function"},{"toolCallId":"B","name":"bash","arguments":{"cmd":"b"},"type":"function"},{"toolCallId":"C","name":"bash","arguments":{"cmd":"c"},"type":"function"}],"reasoningText":"three at once","outputTokens":5},"id":"e2","timestamp":"2026-04-26T10:00:02Z"}
+{"type":"tool.execution_complete","data":{"toolCallId":"C","model":"claude-sonnet-4.6","success":true,"result":{"content":"","detailedContent":"out-c"}},"id":"e3","timestamp":"2026-04-26T10:00:03Z"}
+{"type":"tool.execution_complete","data":{"toolCallId":"B","model":"claude-sonnet-4.6","success":true,"result":{"content":"","detailedContent":"out-b"}},"id":"e4","timestamp":"2026-04-26T10:00:04Z"}
+{"type":"tool.execution_complete","data":{"toolCallId":"A","model":"claude-sonnet-4.6","success":true,"result":{"content":"","detailedContent":"out-a"}},"id":"e5","timestamp":"2026-04-26T10:00:05Z"}
+{"type":"assistant.turn_end","data":{"turnId":"0"},"id":"e6","timestamp":"2026-04-26T10:00:06Z"}
+"#;
+
+#[test]
+fn parallel_tool_completions_pair_by_id() {
+    let t = extract_turn_from_str(PARALLEL, 0).unwrap();
+    let outputs: Vec<&str> = t
+        .blocks
+        .iter()
+        .filter_map(|b| match b {
+            DetailBlock::Tool {
+                result: Some(r), ..
+            } => Some(r.content.as_str()),
+            _ => None,
+        })
+        .collect();
+    // Block order matches toolRequests order: A, B, C.
+    assert_eq!(outputs, vec!["out-a", "out-b", "out-c"]);
+}

@@ -149,3 +149,65 @@ fn redacted_thinking_block() {
         other => panic!("expected redacted Thinking, got {:?}", other),
     }
 }
+
+const SUBAGENT: &str = r#"{"type":"user.message","data":{"content":"delegate"},"id":"u1","timestamp":"2026-04-26T10:00:00Z"}
+{"type":"assistant.turn_start","data":{"turnId":"0"},"id":"e1","timestamp":"2026-04-26T10:00:01Z"}
+{"type":"assistant.message","data":{"content":"","toolRequests":[{"toolCallId":"task1","name":"task","arguments":{"agent_type":"general","prompt":"go"},"type":"function"}],"reasoningText":"hand off","outputTokens":7},"id":"e2","timestamp":"2026-04-26T10:00:02Z"}
+{"type":"assistant.message","data":{"parentToolCallId":"task1","content":"sub: thinking","toolRequests":[],"reasoningText":"sub-internal","outputTokens":1},"id":"e3","timestamp":"2026-04-26T10:00:03Z"}
+{"type":"assistant.message","data":{"parentToolCallId":"task1","content":"sub: done","toolRequests":[],"reasoningText":"","outputTokens":1},"id":"e4","timestamp":"2026-04-26T10:00:04Z"}
+{"type":"tool.execution_complete","data":{"toolCallId":"task1","model":"claude-sonnet-4.6","success":true,"result":{"content":"","detailedContent":"sub-result"}},"id":"e5","timestamp":"2026-04-26T10:00:05Z"}
+{"type":"assistant.message","data":{"content":"All done.","toolRequests":[],"reasoningText":"","outputTokens":3},"id":"e6","timestamp":"2026-04-26T10:00:06Z"}
+{"type":"assistant.turn_end","data":{"turnId":"0"},"id":"e7","timestamp":"2026-04-26T10:00:07Z"}
+"#;
+
+#[test]
+fn subagent_messages_excluded_from_index() {
+    // Two main-thread messages: the task-dispatcher (idx 0) and the wrap-up
+    // text (idx 1). Sub-agent messages must not occupy idx slots.
+    let t0 = extract_turn_from_str(SUBAGENT, 0).unwrap();
+    assert!(matches!(t0.blocks.last().unwrap(),
+        DetailBlock::Tool { name, .. } if name == "task"));
+
+    let t1 = extract_turn_from_str(SUBAGENT, 1).unwrap();
+    assert_eq!(t1.blocks.len(), 1);
+    match &t1.blocks[0] {
+        DetailBlock::Text { text } => assert_eq!(text, "All done."),
+        other => panic!("expected Text wrap-up, got {:?}", other),
+    }
+
+    let t2 = extract_turn_from_str(SUBAGENT, 2);
+    assert!(t2.is_err(), "no third main-thread message exists");
+}
+
+#[test]
+fn large_result_truncated_at_char_boundary() {
+    // Build a fixture whose detailedContent is well past RESULT_BYTE_CAP.
+    let huge = "a".repeat(RESULT_BYTE_CAP * 2);
+    let fixture = format!(
+        r#"{{"type":"user.message","data":{{"content":"big"}},"id":"u1","timestamp":"2026-04-26T10:00:00Z"}}
+{{"type":"assistant.turn_start","data":{{"turnId":"0"}},"id":"e1","timestamp":"2026-04-26T10:00:01Z"}}
+{{"type":"assistant.message","data":{{"content":"","toolRequests":[{{"toolCallId":"h1","name":"bash","arguments":{{}},"type":"function"}}],"reasoningText":"","outputTokens":1}},"id":"e2","timestamp":"2026-04-26T10:00:02Z"}}
+{{"type":"tool.execution_complete","data":{{"toolCallId":"h1","model":"claude-sonnet-4.6","success":true,"result":{{"content":"short","detailedContent":"{}"}}}},"id":"e3","timestamp":"2026-04-26T10:00:03Z"}}
+{{"type":"assistant.turn_end","data":{{"turnId":"0"}},"id":"e4","timestamp":"2026-04-26T10:00:04Z"}}
+"#,
+        huge
+    );
+    let t = extract_turn_from_str(&fixture, 0).unwrap();
+    let r = t
+        .blocks
+        .iter()
+        .find_map(|b| match b {
+            DetailBlock::Tool { result, .. } => result.as_ref(),
+            _ => None,
+        })
+        .unwrap();
+    assert!(r.truncated);
+    assert!(r.content.len() <= RESULT_BYTE_CAP);
+    assert_eq!(r.original_bytes, huge.len());
+}
+
+#[test]
+fn out_of_range_returns_err() {
+    let res = extract_turn_from_str(SIMPLE, 99);
+    assert!(res.is_err());
+}

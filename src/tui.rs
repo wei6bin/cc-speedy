@@ -3784,7 +3784,8 @@ fn draw_help_popup(f: &mut ratatui::Frame, area: Rect) {
     let popup_area = centered_rect(72, 34, area);
     f.render_widget(Clear, popup_area);
 
-    let lines = vec![
+    let lines =
+        vec![
         Line::from(""),
         Line::from(vec![Span::styled("  Navigation", theme::title_style())]),
         Line::from("    j / ↓        next session"),
@@ -3796,6 +3797,16 @@ fn draw_help_popup(f: &mut ratatui::Frame, area: Rect) {
         Line::from("    2            OpenCode only"),
         Line::from("    3            Copilot only"),
         Line::from("    0            all sources"),
+        Line::from(""),
+        Line::from(vec![Span::styled("  Projects view (default)", theme::title_style())]),
+        Line::from("    →  / Enter   drill into selected project"),
+        Line::from("    /            search projects by name"),
+        Line::from("    s            cycle sort (last active / count / a-z)"),
+        Line::from("    1/2/3/0      filter project list by source"),
+        Line::from(""),
+        Line::from(vec![Span::styled("  Inside a project", theme::title_style())]),
+        Line::from("    ←  / P       back to Projects"),
+        Line::from("    Esc          clear in-view search (if any)"),
         Line::from(""),
         Line::from(vec![Span::styled("  Sessions", theme::title_style())]),
         Line::from("    Enter        resume in tmux"),

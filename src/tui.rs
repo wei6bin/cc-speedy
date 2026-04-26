@@ -633,9 +633,9 @@ fn spawn_git_status_check(
     });
 }
 
-/// Synchronously extract the focused turn from the selected CC session's JSONL
-/// and switch to `AppMode::TurnDetail`. Sub-100ms even on 600-turn sessions
-/// (single sequential scan), so blocking the UI thread is acceptable.
+/// Synchronously extract the focused turn from the selected session's JSONL
+/// (CC or Copilot) and switch to `AppMode::TurnDetail`. Sub-100ms even on
+/// 600-turn sessions (single sequential scan), so blocking the UI thread is acceptable.
 fn open_turn_detail(app: &mut AppState) {
     let Some(turn_idx) = app.glyph_cursor else {
         return;
@@ -796,7 +796,7 @@ fn maybe_spawn_insights_load(app: &AppState) {
             SessionSource::Copilot => {
                 crate::copilot_insights::parse_insights(std::path::Path::new(&jsonl))
             }
-            SessionSource::OpenCode => unreachable!(),
+            SessionSource::OpenCode => unreachable!("filtered above"),
         };
         if let Ok(insights) = parsed {
             if let Ok(conn) = db.lock() {
@@ -1820,10 +1820,17 @@ async fn run_event_loop(
                             if next != cur {
                                 if let Some(s) = app.selected_session() {
                                     if let Some(jsonl) = s.jsonl_path.clone() {
-                                        if let Ok(new_td) = crate::turn_detail::extract_turn(
-                                            std::path::Path::new(&jsonl),
-                                            next,
-                                        ) {
+                                        let path = std::path::Path::new(&jsonl);
+                                        let result = match s.source {
+                                            SessionSource::ClaudeCode => {
+                                                crate::turn_detail::extract_turn(path, next)
+                                            }
+                                            SessionSource::Copilot => {
+                                                crate::copilot_turn_detail::extract_turn(path, next)
+                                            }
+                                            SessionSource::OpenCode => return Ok(()), // unreachable: TurnDetail mode is gated to CC/Copilot
+                                        };
+                                        if let Ok(new_td) = result {
                                             app.glyph_cursor = Some(next as usize);
                                             app.turn_detail_expanded =
                                                 default_expansion(&new_td.blocks);

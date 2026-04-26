@@ -924,12 +924,9 @@ async fn run_event_loop(
                         app.rebuild_projects();
                     }
 
-                    // Esc in Normal clears the project filter (if any). `q` still quits.
-                    (AppMode::Normal, _, KeyCode::Esc) if app.project_filter.is_some() => {
-                        app.project_filter = None;
+                    (AppMode::Normal, _, KeyCode::Esc) if !app.filter.is_empty() => {
+                        app.filter.clear();
                         app.apply_filter();
-                        app.status_msg =
-                            Some(("Project filter cleared".to_string(), Instant::now()));
                     }
 
                     // --- Weekly Digest ---
@@ -1142,11 +1139,9 @@ async fn run_event_loop(
                         app.mode = AppMode::Projects;
                         app.rebuild_projects();
                     }
-                    (AppMode::Projects, _, KeyCode::Esc) => {
-                        app.mode = AppMode::Normal;
-                        app.projects.clear();
-                        app.projects_filtered.clear();
+                    (AppMode::Projects, _, KeyCode::Esc) if !app.projects_filter.is_empty() => {
                         app.projects_filter.clear();
+                        app.apply_projects_filter();
                     }
                     (AppMode::Projects, _, KeyCode::Char('/')) => {
                         app.mode = AppMode::ProjectsFilter;

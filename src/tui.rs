@@ -65,6 +65,8 @@ pub struct ProjectRow {
     pub name: String,
     pub session_count: usize,
     pub pinned_count: usize,
+    pub learnings_count: usize,
+    pub pending_count: usize,
     pub last_active: std::time::SystemTime,
 }
 
@@ -305,7 +307,19 @@ impl AppState {
     /// Sorts per `projects_sort`. Filter is applied separately via
     /// `apply_projects_filter()`.
     fn rebuild_projects(&mut self) {
-        self.projects = build_project_rows(&self.sessions, &self.pinned);
+        let has_learnings = self
+            .has_learnings
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+        let summaries = self.summaries.lock().map(|g| g.clone()).unwrap_or_default();
+        self.projects = build_project_rows(
+            &self.sessions,
+            &self.pinned,
+            &has_learnings,
+            &summaries,
+            self.source_filter.clone(),
+        );
         self.sort_projects();
         self.apply_projects_filter();
     }
@@ -554,15 +568,27 @@ pub fn parse_filter_tokens(query: &str) -> (Vec<String>, Vec<String>) {
 
 /// Group sessions by `project_path` into Project Dashboard rows.
 /// Archived sessions are included in counts. Last-active is the max of
-/// session.modified across the group. Pinned count is the number of sessions
-/// in the group whose id is in the pinned set.
+/// session.modified across the group. Pinned count is the number of
+/// sessions in the group whose id is in the pinned set.
+///
+/// When `source_filter` is `Some`, sessions whose source doesn't match are
+/// skipped before grouping; projects with no matching sessions disappear
+/// from the result, and per-row counts reflect only the filtered subset.
 pub fn build_project_rows(
     sessions: &[UnifiedSession],
     pinned: &std::collections::HashSet<String>,
+    has_learnings: &std::collections::HashSet<String>,
+    summaries: &std::collections::HashMap<String, String>,
+    source_filter: Option<crate::unified::SessionSource>,
 ) -> Vec<ProjectRow> {
     use std::collections::HashMap;
     let mut acc: HashMap<String, ProjectRow> = HashMap::new();
     for s in sessions {
+        if let Some(ref sf) = source_filter {
+            if &s.source != sf {
+                continue;
+            }
+        }
         let row = acc
             .entry(s.project_path.clone())
             .or_insert_with(|| ProjectRow {
@@ -570,11 +596,19 @@ pub fn build_project_rows(
                 name: crate::util::path_last_n(&s.project_path, 2),
                 session_count: 0,
                 pinned_count: 0,
+                learnings_count: 0,
+                pending_count: 0,
                 last_active: std::time::UNIX_EPOCH,
             });
         row.session_count += 1;
         if pinned.contains(&s.session_id) {
             row.pinned_count += 1;
+        }
+        if has_learnings.contains(&s.session_id) {
+            row.learnings_count += 1;
+        }
+        if !summaries.contains_key(&s.session_id) {
+            row.pending_count += 1;
         }
         if s.modified > row.last_active {
             row.last_active = s.modified;

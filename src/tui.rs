@@ -920,6 +920,8 @@ async fn run_event_loop(
                     (AppMode::Normal, _, KeyCode::Char('q')) => break,
                     (AppMode::Normal, _, KeyCode::Left) => {
                         app.project_filter = None;
+                        app.filter.clear();
+                        app.apply_filter();
                         app.mode = AppMode::Projects;
                         app.rebuild_projects();
                     }
@@ -1135,6 +1137,8 @@ async fn run_event_loop(
                     // --- Project Dashboard mode ---
                     (AppMode::Normal, _, KeyCode::Char('P')) => {
                         app.project_filter = None;
+                        app.filter.clear();
+                        app.apply_filter();
                         app.projects_filter.clear();
                         app.mode = AppMode::Projects;
                         app.rebuild_projects();

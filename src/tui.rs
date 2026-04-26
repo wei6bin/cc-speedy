@@ -2349,11 +2349,18 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
                 ProjectSort::SessionCount => "session count",
                 ProjectSort::Alphabetical => "alphabetical",
             };
+            let src_tag = match &app.source_filter {
+                None => "all",
+                Some(crate::unified::SessionSource::ClaudeCode) => "CC",
+                Some(crate::unified::SessionSource::OpenCode) => "OC",
+                Some(crate::unified::SessionSource::Copilot) => "CO",
+            };
             let n = app.projects_filtered.len();
             (
                 format!(
-                    "  sort: {}  ·  {} project{}  (/: filter  s: sort  Enter: drill  Esc: exit)",
+                    "  sort: {}  ·  src: {}  ·  {} project{}  (/: search  s: sort  →: enter  q: quit)",
                     sort_label,
+                    src_tag,
                     n,
                     if n == 1 { "" } else { "s" }
                 ),
@@ -2387,13 +2394,24 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
         AppMode::Help => ("".to_string(), " cc-speedy — Help "),
         AppMode::TurnDetail => ("".to_string(), " cc-speedy "),
         AppMode::Normal => {
+            let src_tag = match &app.source_filter {
+                None => "all",
+                Some(crate::unified::SessionSource::ClaudeCode) => "CC",
+                Some(crate::unified::SessionSource::OpenCode) => "OC",
+                Some(crate::unified::SessionSource::Copilot) => "CO",
+            };
             let hint = if let Some(ref pp) = app.project_filter {
-                format!(
-                    "  project: {}  (Esc to clear)",
-                    crate::util::path_last_n(pp, 2)
-                )
+                if app.filter.is_empty() {
+                    format!(
+                        "  project: {}  [src: {}]  (← projects · / search)",
+                        crate::util::path_last_n(pp, 2),
+                        src_tag
+                    )
+                } else {
+                    format!("  filter: {}  (Esc clear)", app.filter)
+                }
             } else if app.filter.is_empty() {
-                "  (F1: help  /: filter  ?: grep  L: library  P: projects)".to_string()
+                "  (F1: help  /: filter  ?: grep  L: library)".to_string()
             } else {
                 format!("  filter: {}", app.filter)
             };

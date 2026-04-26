@@ -2733,10 +2733,28 @@ fn draw_projects(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
         .map(ListItem::new)
         .collect();
 
+    let items: Vec<ListItem> = if items.is_empty() {
+        let msg = if app.projects.is_empty() {
+            "  No projects yet. Start a coding agent and your sessions will appear here."
+        } else {
+            "  No projects match the current filter."
+        };
+        vec![ListItem::new(Line::from(Span::styled(
+            msg,
+            theme::dim_style(),
+        )))]
+    } else {
+        items
+    };
+
     let title = format!(
         " Project Dashboard — {} project{} ",
-        items.len(),
-        if items.len() == 1 { "" } else { "s" },
+        app.projects_filtered.len(),
+        if app.projects_filtered.len() == 1 {
+            ""
+        } else {
+            "s"
+        },
     );
     let list = List::new(items)
         .block(

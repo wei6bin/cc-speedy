@@ -310,9 +310,13 @@ impl AppState {
         let has_learnings = self
             .has_learnings
             .lock()
-            .map(|g| g.clone())
-            .unwrap_or_default();
-        let summaries = self.summaries.lock().map(|g| g.clone()).unwrap_or_default();
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let summaries = self
+            .summaries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         self.projects = build_project_rows(
             &self.sessions,
             &self.pinned,

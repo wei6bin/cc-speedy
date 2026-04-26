@@ -283,7 +283,7 @@ pub fn build_project_rows(
 }
 ```
 
-Note: `SessionSource` already implements `PartialEq + Copy` in `src/unified.rs`. The `if s.source != sf` comparison compiles directly.
+Note: `SessionSource` derives `Debug, Clone, PartialEq` in `src/unified.rs` (not `Copy`). The `if let Some(ref sf) = source_filter` + `&s.source != sf` form avoids a move.
 
 - [ ] **Step 7: Update the single in-tree caller**
 
@@ -299,23 +299,23 @@ Replace with:
 let has_learnings = self
     .has_learnings
     .lock()
-    .map(|g| g.clone())
-    .unwrap_or_default();
+    .unwrap_or_else(|e| e.into_inner())
+    .clone();
 let summaries = self
     .summaries
     .lock()
-    .map(|g| g.clone())
-    .unwrap_or_default();
+    .unwrap_or_else(|e| e.into_inner())
+    .clone();
 self.projects = build_project_rows(
     &self.sessions,
     &self.pinned,
     &has_learnings,
     &summaries,
-    self.source_filter,
+    self.source_filter.clone(),
 );
 ```
 
-The `.clone()` on the locked guards snapshots the cache contents and releases the lock immediately — `build_project_rows` runs on the snapshot. This avoids holding the mutex across the grouping pass.
+The `.clone()` on the locked guards snapshots the cache contents and releases the lock immediately — `build_project_rows` runs on the snapshot. This avoids holding the mutex across the grouping pass. `unwrap_or_else(|e| e.into_inner())` matches the codebase convention elsewhere in `tui.rs` for recovering from a poisoned mutex (the alternative `unwrap_or_default()` would silently drop cache data on poisoning, making counts wrong). `SessionSource` derives `Clone` (not `Copy`), so `self.source_filter.clone()` is needed to pass by value.
 
 - [ ] **Step 8: Run the test suite**
 
@@ -754,7 +754,7 @@ Replace with:
 
 ```rust
 AppMode::Normal => {
-    let src_tag = match app.source_filter {
+    let src_tag = match &app.source_filter {
         None => "all",
         Some(crate::unified::SessionSource::ClaudeCode) => "CC",
         Some(crate::unified::SessionSource::OpenCode) => "OC",

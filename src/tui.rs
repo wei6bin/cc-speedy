@@ -65,6 +65,8 @@ pub struct ProjectRow {
     pub name: String,
     pub session_count: usize,
     pub pinned_count: usize,
+    pub learnings_count: usize,
+    pub pending_count: usize,
     pub last_active: std::time::SystemTime,
 }
 
@@ -195,7 +197,7 @@ impl AppState {
             filter: String::new(),
             grep_query: String::new(),
             grep_haystacks: Vec::new(),
-            mode: AppMode::Normal,
+            mode: AppMode::Projects,
             rename_input: String::new(),
             summaries: Arc::new(Mutex::new(summaries_map)),
             summary_generated_at: Arc::new(Mutex::new(generated_at)),
@@ -247,6 +249,7 @@ impl AppState {
         // Split archived out of the active list on startup so the "all" view
         // correctly shows archived sessions in the bottom-left panel.
         state.apply_filter();
+        state.rebuild_projects();
         Ok(state)
     }
 
@@ -305,7 +308,23 @@ impl AppState {
     /// Sorts per `projects_sort`. Filter is applied separately via
     /// `apply_projects_filter()`.
     fn rebuild_projects(&mut self) {
-        self.projects = build_project_rows(&self.sessions, &self.pinned);
+        let has_learnings = self
+            .has_learnings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let summaries = self
+            .summaries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        self.projects = build_project_rows(
+            &self.sessions,
+            &self.pinned,
+            &has_learnings,
+            &summaries,
+            self.source_filter.clone(),
+        );
         self.sort_projects();
         self.apply_projects_filter();
     }
@@ -554,15 +573,27 @@ pub fn parse_filter_tokens(query: &str) -> (Vec<String>, Vec<String>) {
 
 /// Group sessions by `project_path` into Project Dashboard rows.
 /// Archived sessions are included in counts. Last-active is the max of
-/// session.modified across the group. Pinned count is the number of sessions
-/// in the group whose id is in the pinned set.
+/// session.modified across the group. Pinned count is the number of
+/// sessions in the group whose id is in the pinned set.
+///
+/// When `source_filter` is `Some`, sessions whose source doesn't match are
+/// skipped before grouping; projects with no matching sessions disappear
+/// from the result, and per-row counts reflect only the filtered subset.
 pub fn build_project_rows(
     sessions: &[UnifiedSession],
     pinned: &std::collections::HashSet<String>,
+    has_learnings: &std::collections::HashSet<String>,
+    summaries: &std::collections::HashMap<String, String>,
+    source_filter: Option<crate::unified::SessionSource>,
 ) -> Vec<ProjectRow> {
     use std::collections::HashMap;
     let mut acc: HashMap<String, ProjectRow> = HashMap::new();
     for s in sessions {
+        if let Some(ref sf) = source_filter {
+            if &s.source != sf {
+                continue;
+            }
+        }
         let row = acc
             .entry(s.project_path.clone())
             .or_insert_with(|| ProjectRow {
@@ -570,11 +601,19 @@ pub fn build_project_rows(
                 name: crate::util::path_last_n(&s.project_path, 2),
                 session_count: 0,
                 pinned_count: 0,
+                learnings_count: 0,
+                pending_count: 0,
                 last_active: std::time::UNIX_EPOCH,
             });
         row.session_count += 1;
         if pinned.contains(&s.session_id) {
             row.pinned_count += 1;
+        }
+        if has_learnings.contains(&s.session_id) {
+            row.learnings_count += 1;
+        }
+        if !summaries.contains_key(&s.session_id) {
+            row.pending_count += 1;
         }
         if s.modified > row.last_active {
             row.last_active = s.modified;
@@ -879,13 +918,18 @@ async fn run_event_loop(
                     // --- Global ---
                     (_, KeyModifiers::CONTROL, KeyCode::Char('c')) => break,
                     (AppMode::Normal, _, KeyCode::Char('q')) => break,
-
-                    // Esc in Normal clears the project filter (if any). `q` still quits.
-                    (AppMode::Normal, _, KeyCode::Esc) if app.project_filter.is_some() => {
+                    (AppMode::Projects, _, KeyCode::Char('q')) => break,
+                    (AppMode::Normal, _, KeyCode::Left) => {
                         app.project_filter = None;
+                        app.filter.clear();
                         app.apply_filter();
-                        app.status_msg =
-                            Some(("Project filter cleared".to_string(), Instant::now()));
+                        app.mode = AppMode::Projects;
+                        app.rebuild_projects();
+                    }
+
+                    (AppMode::Normal, _, KeyCode::Esc) if !app.filter.is_empty() => {
+                        app.filter.clear();
+                        app.apply_filter();
                     }
 
                     // --- Weekly Digest ---
@@ -1093,15 +1137,16 @@ async fn run_event_loop(
 
                     // --- Project Dashboard mode ---
                     (AppMode::Normal, _, KeyCode::Char('P')) => {
+                        app.project_filter = None;
+                        app.filter.clear();
+                        app.apply_filter();
                         app.projects_filter.clear();
-                        app.rebuild_projects();
                         app.mode = AppMode::Projects;
+                        app.rebuild_projects();
                     }
-                    (AppMode::Projects, _, KeyCode::Esc) => {
-                        app.mode = AppMode::Normal;
-                        app.projects.clear();
-                        app.projects_filtered.clear();
+                    (AppMode::Projects, _, KeyCode::Esc) if !app.projects_filter.is_empty() => {
                         app.projects_filter.clear();
+                        app.apply_projects_filter();
                     }
                     (AppMode::Projects, _, KeyCode::Char('/')) => {
                         app.mode = AppMode::ProjectsFilter;
@@ -1128,7 +1173,8 @@ async fn run_event_loop(
                         let i = app.projects_list_state.selected().unwrap_or(0);
                         app.projects_list_state.select(Some(i.saturating_sub(1)));
                     }
-                    (AppMode::Projects, _, KeyCode::Enter) => {
+                    (AppMode::Projects, _, KeyCode::Enter)
+                    | (AppMode::Projects, _, KeyCode::Right) => {
                         let target = app
                             .projects_list_state
                             .selected()
@@ -1339,13 +1385,21 @@ async fn run_event_loop(
                             if let Some(s) = app.selected_session() {
                                 let id = s.session_id.clone();
                                 let _ = crate::sessions::write_rename(&id, &title);
-                                // Update in-memory immediately
-                                if let Some(idx) = app.list_state_active.selected() {
-                                    if let Some(&raw) = app.filtered_active.get(idx) {
-                                        if let Some(s) = app.sessions.get_mut(raw) {
-                                            s.summary = title;
-                                        }
-                                    }
+                            }
+                            // Update in-memory immediately for whichever list has focus
+                            let raw = match app.focus {
+                                Focus::ActiveList | Focus::Preview => app
+                                    .list_state_active
+                                    .selected()
+                                    .and_then(|idx| app.filtered_active.get(idx).copied()),
+                                Focus::ArchivedList => app
+                                    .list_state_archived
+                                    .selected()
+                                    .and_then(|idx| app.filtered_archived.get(idx).copied()),
+                            };
+                            if let Some(raw) = raw {
+                                if let Some(s) = app.sessions.get_mut(raw) {
+                                    s.summary = title;
                                 }
                             }
                         }
@@ -1520,6 +1574,22 @@ async fn run_event_loop(
                     (AppMode::Normal, KeyModifiers::NONE, KeyCode::Char('0')) => {
                         app.source_filter = None;
                         app.apply_filter();
+                    }
+                    (AppMode::Projects, KeyModifiers::NONE, KeyCode::Char('1')) => {
+                        app.source_filter = Some(SessionSource::ClaudeCode);
+                        app.rebuild_projects();
+                    }
+                    (AppMode::Projects, KeyModifiers::NONE, KeyCode::Char('2')) => {
+                        app.source_filter = Some(SessionSource::OpenCode);
+                        app.rebuild_projects();
+                    }
+                    (AppMode::Projects, KeyModifiers::NONE, KeyCode::Char('3')) => {
+                        app.source_filter = Some(SessionSource::Copilot);
+                        app.rebuild_projects();
+                    }
+                    (AppMode::Projects, KeyModifiers::NONE, KeyCode::Char('0')) => {
+                        app.source_filter = None;
+                        app.rebuild_projects();
                     }
 
                     (AppMode::Normal, _, KeyCode::Enter) | (AppMode::Grep, _, KeyCode::Enter) => {
@@ -2293,11 +2363,18 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
                 ProjectSort::SessionCount => "session count",
                 ProjectSort::Alphabetical => "alphabetical",
             };
+            let src_tag = match &app.source_filter {
+                None => "all",
+                Some(crate::unified::SessionSource::ClaudeCode) => "CC",
+                Some(crate::unified::SessionSource::OpenCode) => "OC",
+                Some(crate::unified::SessionSource::Copilot) => "CO",
+            };
             let n = app.projects_filtered.len();
             (
                 format!(
-                    "  sort: {}  ·  {} project{}  (/: filter  s: sort  Enter: drill  Esc: exit)",
+                    "  sort: {}  ·  src: {}  ·  {} project{}  (/: search  s: sort  →: enter  q: quit)",
                     sort_label,
+                    src_tag,
                     n,
                     if n == 1 { "" } else { "s" }
                 ),
@@ -2331,13 +2408,24 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
         AppMode::Help => ("".to_string(), " cc-speedy — Help "),
         AppMode::TurnDetail => ("".to_string(), " cc-speedy "),
         AppMode::Normal => {
+            let src_tag = match &app.source_filter {
+                None => "all",
+                Some(crate::unified::SessionSource::ClaudeCode) => "CC",
+                Some(crate::unified::SessionSource::OpenCode) => "OC",
+                Some(crate::unified::SessionSource::Copilot) => "CO",
+            };
             let hint = if let Some(ref pp) = app.project_filter {
-                format!(
-                    "  project: {}  (Esc to clear)",
-                    crate::util::path_last_n(pp, 2)
-                )
+                if app.filter.is_empty() {
+                    format!(
+                        "  project: {}  [src: {}]  (← projects · / search)",
+                        crate::util::path_last_n(pp, 2),
+                        src_tag
+                    )
+                } else {
+                    format!("  filter: {}  (Esc clear)", app.filter)
+                }
             } else if app.filter.is_empty() {
-                "  (F1: help  /: filter  ?: grep  L: library  P: projects)".to_string()
+                "  (F1: help  /: filter  ?: grep  L: library)".to_string()
             } else {
                 format!("  filter: {}", app.filter)
             };
@@ -2626,6 +2714,16 @@ fn draw_projects(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
             } else {
                 String::new()
             };
+            let learnings_str = if p.learnings_count > 0 {
+                format!("📝{} ", p.learnings_count)
+            } else {
+                "    ".to_string()
+            };
+            let pending_str = if p.pending_count > 0 {
+                format!("⏳{} ", p.pending_count)
+            } else {
+                "    ".to_string()
+            };
             Line::from(vec![
                 Span::styled(format!("{} ", glyph), Style::default().fg(gcolor)),
                 Span::styled(
@@ -2637,6 +2735,8 @@ fn draw_projects(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
                     Style::default().fg(theme::FG),
                 ),
                 Span::styled(format!("{:>4} ", p.session_count), theme::dim_style()),
+                Span::styled(learnings_str, theme::dim_style()),
+                Span::styled(pending_str, theme::dim_style()),
                 Span::styled(
                     format!("last: {}", format_time(p.last_active)),
                     theme::dim_style(),
@@ -2647,27 +2747,59 @@ fn draw_projects(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
         .map(ListItem::new)
         .collect();
 
+    let items: Vec<ListItem> = if items.is_empty() {
+        let msg = if app.projects.is_empty() {
+            "  No projects yet. Start a coding agent and your sessions will appear here."
+        } else {
+            "  No projects match the current filter."
+        };
+        vec![ListItem::new(Line::from(Span::styled(
+            msg,
+            theme::dim_style(),
+        )))]
+    } else {
+        items
+    };
+
     let title = format!(
         " Project Dashboard — {} project{} ",
-        items.len(),
-        if items.len() == 1 { "" } else { "s" },
+        app.projects_filtered.len(),
+        if app.projects_filtered.len() == 1 {
+            ""
+        } else {
+            "s"
+        },
+    );
+    let block = Block::default()
+        .border_type(theme::BORDER_TYPE)
+        .borders(Borders::ALL)
+        .border_style(theme::panel_block_style(theme::BORDER_FOCUSED))
+        .title(Span::styled(title, theme::title_style()));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    // Split inner: 1-line column header + scrollable list
+    let inner_split = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(inner);
+    f.render_widget(
+        Paragraph::new(Line::from(vec![Span::styled(
+            "  g  branch               name                         #    learn pend  last active",
+            theme::dim_style(),
+        )])),
+        inner_split[0],
     );
     let list = List::new(items)
-        .block(
-            Block::default()
-                .border_type(theme::BORDER_TYPE)
-                .borders(Borders::ALL)
-                .border_style(theme::panel_block_style(theme::BORDER_FOCUSED))
-                .title(Span::styled(title, theme::title_style())),
-        )
         .highlight_style(
             Style::default()
                 .bg(theme::SEL_BG)
                 .fg(theme::SEL_FG)
                 .add_modifier(ratatui::style::Modifier::BOLD),
-        );
+        )
+        .highlight_symbol("► ");
 
-    f.render_stateful_widget(list, area, &mut app.projects_list_state);
+    f.render_stateful_widget(list, inner_split[1], &mut app.projects_list_state);
 }
 
 fn draw_library(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
@@ -2810,21 +2942,34 @@ fn draw_list(
     } else {
         theme::BORDER_LIST
     };
+    let block = Block::default()
+        .border_type(theme::BORDER_TYPE)
+        .borders(Borders::ALL)
+        .border_style(theme::panel_block_style(border_color))
+        .title(Span::styled(
+            format!(" {} ({}) ", title, count),
+            theme::title_style(),
+        ));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    // Split inner: 1-line column header + scrollable list
+    let inner_split = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(inner);
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "  ★   date        src  ✓ ◆ ●  title                   msgs  folder",
+            theme::dim_style(),
+        ))),
+        inner_split[0],
+    );
     let list = List::new(items)
-        .block(
-            Block::default()
-                .border_type(theme::BORDER_TYPE)
-                .borders(Borders::ALL)
-                .border_style(theme::panel_block_style(border_color))
-                .title(Span::styled(
-                    format!(" {} ({}) ", title, count),
-                    theme::title_style(),
-                )),
-        )
         .highlight_style(theme::sel_style())
         .highlight_symbol("► ");
 
-    f.render_stateful_widget(list, area, list_state);
+    f.render_stateful_widget(list, inner_split[1], list_state);
 }
 
 fn build_preview_content(app: &AppState) -> String {
@@ -3698,7 +3843,8 @@ fn draw_help_popup(f: &mut ratatui::Frame, area: Rect) {
     let popup_area = centered_rect(72, 34, area);
     f.render_widget(Clear, popup_area);
 
-    let lines = vec![
+    let lines =
+        vec![
         Line::from(""),
         Line::from(vec![Span::styled("  Navigation", theme::title_style())]),
         Line::from("    j / ↓        next session"),
@@ -3710,6 +3856,16 @@ fn draw_help_popup(f: &mut ratatui::Frame, area: Rect) {
         Line::from("    2            OpenCode only"),
         Line::from("    3            Copilot only"),
         Line::from("    0            all sources"),
+        Line::from(""),
+        Line::from(vec![Span::styled("  Projects view (default)", theme::title_style())]),
+        Line::from("    →  / Enter   drill into selected project"),
+        Line::from("    /            search projects by name"),
+        Line::from("    s            cycle sort (last active / count / a-z)"),
+        Line::from("    1/2/3/0      filter project list by source"),
+        Line::from(""),
+        Line::from(vec![Span::styled("  Inside a project", theme::title_style())]),
+        Line::from("    ←  / P       back to Projects"),
+        Line::from("    Esc          clear in-view search (if any)"),
         Line::from(""),
         Line::from(vec![Span::styled("  Sessions", theme::title_style())]),
         Line::from("    Enter        resume in tmux"),

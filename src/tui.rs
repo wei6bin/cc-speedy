@@ -918,6 +918,7 @@ async fn run_event_loop(
                     // --- Global ---
                     (_, KeyModifiers::CONTROL, KeyCode::Char('c')) => break,
                     (AppMode::Normal, _, KeyCode::Char('q')) => break,
+                    (AppMode::Projects, _, KeyCode::Char('q')) => break,
                     (AppMode::Normal, _, KeyCode::Left) => {
                         app.project_filter = None;
                         app.filter.clear();
@@ -1172,7 +1173,8 @@ async fn run_event_loop(
                         let i = app.projects_list_state.selected().unwrap_or(0);
                         app.projects_list_state.select(Some(i.saturating_sub(1)));
                     }
-                    (AppMode::Projects, _, KeyCode::Enter) => {
+                    (AppMode::Projects, _, KeyCode::Enter)
+                    | (AppMode::Projects, _, KeyCode::Right) => {
                         let target = app
                             .projects_list_state
                             .selected()
@@ -1383,13 +1385,21 @@ async fn run_event_loop(
                             if let Some(s) = app.selected_session() {
                                 let id = s.session_id.clone();
                                 let _ = crate::sessions::write_rename(&id, &title);
-                                // Update in-memory immediately
-                                if let Some(idx) = app.list_state_active.selected() {
-                                    if let Some(&raw) = app.filtered_active.get(idx) {
-                                        if let Some(s) = app.sessions.get_mut(raw) {
-                                            s.summary = title;
-                                        }
-                                    }
+                            }
+                            // Update in-memory immediately for whichever list has focus
+                            let raw = match app.focus {
+                                Focus::ActiveList | Focus::Preview => app
+                                    .list_state_active
+                                    .selected()
+                                    .and_then(|idx| app.filtered_active.get(idx).copied()),
+                                Focus::ArchivedList => app
+                                    .list_state_archived
+                                    .selected()
+                                    .and_then(|idx| app.filtered_archived.get(idx).copied()),
+                            };
+                            if let Some(raw) = raw {
+                                if let Some(s) = app.sessions.get_mut(raw) {
+                                    s.summary = title;
                                 }
                             }
                         }
@@ -2760,22 +2770,36 @@ fn draw_projects(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
             "s"
         },
     );
+    let block = Block::default()
+        .border_type(theme::BORDER_TYPE)
+        .borders(Borders::ALL)
+        .border_style(theme::panel_block_style(theme::BORDER_FOCUSED))
+        .title(Span::styled(title, theme::title_style()));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    // Split inner: 1-line column header + scrollable list
+    let inner_split = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(inner);
+    f.render_widget(
+        Paragraph::new(Line::from(vec![Span::styled(
+            "  g  branch               name                         #    learn pend  last active",
+            theme::dim_style(),
+        )])),
+        inner_split[0],
+    );
     let list = List::new(items)
-        .block(
-            Block::default()
-                .border_type(theme::BORDER_TYPE)
-                .borders(Borders::ALL)
-                .border_style(theme::panel_block_style(theme::BORDER_FOCUSED))
-                .title(Span::styled(title, theme::title_style())),
-        )
         .highlight_style(
             Style::default()
                 .bg(theme::SEL_BG)
                 .fg(theme::SEL_FG)
                 .add_modifier(ratatui::style::Modifier::BOLD),
-        );
+        )
+        .highlight_symbol("► ");
 
-    f.render_stateful_widget(list, area, &mut app.projects_list_state);
+    f.render_stateful_widget(list, inner_split[1], &mut app.projects_list_state);
 }
 
 fn draw_library(f: &mut ratatui::Frame, app: &mut AppState, area: Rect) {
@@ -2918,21 +2942,34 @@ fn draw_list(
     } else {
         theme::BORDER_LIST
     };
+    let block = Block::default()
+        .border_type(theme::BORDER_TYPE)
+        .borders(Borders::ALL)
+        .border_style(theme::panel_block_style(border_color))
+        .title(Span::styled(
+            format!(" {} ({}) ", title, count),
+            theme::title_style(),
+        ));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    // Split inner: 1-line column header + scrollable list
+    let inner_split = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(inner);
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "  ★   date        src  ✓ ◆ ●  title                   msgs  folder",
+            theme::dim_style(),
+        ))),
+        inner_split[0],
+    );
     let list = List::new(items)
-        .block(
-            Block::default()
-                .border_type(theme::BORDER_TYPE)
-                .borders(Borders::ALL)
-                .border_style(theme::panel_block_style(border_color))
-                .title(Span::styled(
-                    format!(" {} ({}) ", title, count),
-                    theme::title_style(),
-                )),
-        )
         .highlight_style(theme::sel_style())
         .highlight_symbol("► ");
 
-    f.render_stateful_widget(list, area, list_state);
+    f.render_stateful_widget(list, inner_split[1], list_state);
 }
 
 fn build_preview_content(app: &AppState) -> String {

@@ -50,6 +50,31 @@ pub fn compute_refresh_diff(prior: &[UnifiedSession], new: Vec<UnifiedSession>) 
     }
 }
 
+/// Returns the new selection index (a position into `filtered`) for a session
+/// whose `session_id` matches `target_id`. Falls back to `Some(0)` when the
+/// target is missing but `filtered` is non-empty, and `None` when `filtered`
+/// is empty. Used by `AppState::drain_refresh_results` to preserve selection
+/// across re-scans.
+pub fn select_index_for_session_id(
+    filtered: &[usize],
+    sessions: &[UnifiedSession],
+    target_id: Option<&str>,
+) -> Option<usize> {
+    if filtered.is_empty() {
+        return None;
+    }
+    if let Some(target) = target_id {
+        for (pos, &raw) in filtered.iter().enumerate() {
+            if let Some(s) = sessions.get(raw) {
+                if s.session_id == target {
+                    return Some(pos);
+                }
+            }
+        }
+    }
+    Some(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,5 +172,59 @@ mod tests {
         let r = compute_refresh_diff(&prior, new);
         assert_eq!(r.new_count, 2);
         assert_eq!(r.updated_count, 1);
+    }
+
+    #[test]
+    fn select_returns_index_when_target_present() {
+        let sessions = vec![
+            make_session("a", 100),
+            make_session("b", 200),
+            make_session("c", 300),
+        ];
+        let filtered = vec![0, 1, 2];
+        let idx = select_index_for_session_id(&filtered, &sessions, Some("b"));
+        assert_eq!(idx, Some(1));
+    }
+
+    #[test]
+    fn select_falls_back_to_zero_when_target_missing_but_list_non_empty() {
+        let sessions = vec![make_session("a", 100), make_session("b", 200)];
+        let filtered = vec![0, 1];
+        let idx = select_index_for_session_id(&filtered, &sessions, Some("zzz"));
+        assert_eq!(idx, Some(0));
+    }
+
+    #[test]
+    fn select_returns_none_when_filtered_is_empty() {
+        let sessions = vec![make_session("a", 100)];
+        let filtered: Vec<usize> = vec![];
+        let idx = select_index_for_session_id(&filtered, &sessions, Some("a"));
+        assert_eq!(idx, None);
+    }
+
+    #[test]
+    fn select_returns_zero_when_target_id_is_none() {
+        let sessions = vec![make_session("a", 100)];
+        let filtered = vec![0];
+        let idx = select_index_for_session_id(&filtered, &sessions, None);
+        assert_eq!(idx, Some(0));
+    }
+
+    #[test]
+    fn select_works_with_sparse_filtered() {
+        let sessions = vec![
+            make_session("a", 100),
+            make_session("b", 200),
+            make_session("c", 300),
+        ];
+        let filtered = vec![0, 2];
+        assert_eq!(
+            select_index_for_session_id(&filtered, &sessions, Some("c")),
+            Some(1)
+        );
+        assert_eq!(
+            select_index_for_session_id(&filtered, &sessions, Some("b")),
+            Some(0)
+        );
     }
 }

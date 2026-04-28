@@ -79,6 +79,7 @@ fn build_router(state: WebState) -> Router {
         .route("/health", get(handlers::health))
         .route("/api/sessions", get(handlers::api_sessions))
         .route("/api/session/{id}/turns/{idx}", get(handlers::api_turn))
+        .route("/session/{id}/stream", get(handlers::sse_stream))
         .route("/static/app.css", get(handlers::static_app_css))
         .route("/static/app.js", get(handlers::static_app_js))
         .with_state(state)
@@ -220,6 +221,80 @@ mod tests {
         );
         let resp = reqwest::get(&url).await.unwrap();
         assert!(resp.status().is_client_error());
+        handle.shutdown();
+    }
+
+    #[tokio::test]
+    async fn sse_emits_turn_added_when_jsonl_grows() {
+        use crate::unified::{SessionSource, UnifiedSession};
+        use std::time::SystemTime;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("test.jsonl");
+        std::fs::write(&path, "").unwrap();
+
+        let sessions = vec![UnifiedSession {
+            session_id: "s1".to_string(),
+            project_name: "p".to_string(),
+            project_path: "/tmp".to_string(),
+            modified: SystemTime::now(),
+            message_count: 0,
+            first_user_msg: String::new(),
+            summary: String::new(),
+            git_branch: String::new(),
+            source: SessionSource::ClaudeCode,
+            jsonl_path: Some(path.to_string_lossy().into_owned()),
+            archived: false,
+        }];
+        let state = WebState {
+            sessions: Arc::new(std::sync::Mutex::new(sessions)),
+            liveness_cache: Arc::new(std::sync::Mutex::new(Default::default())),
+            tailer_registry: tailer::TailerRegistry::default(),
+        };
+        let handle = start(state).await.unwrap();
+        let url = format!("http://{}/session/s1/stream", handle.addr);
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(4);
+        tokio::spawn(async move {
+            let resp = reqwest::get(&url).await.unwrap();
+            let mut stream = resp.bytes_stream();
+            use futures::StreamExt;
+            while let Some(Ok(chunk)) = stream.next().await {
+                let s = String::from_utf8_lossy(&chunk).to_string();
+                if !s.trim().is_empty() {
+                    let _ = tx.send(s.clone()).await;
+                    if !s.contains(":keep-alive") && s.contains("turn-added") {
+                        return;
+                    }
+                }
+            }
+        });
+
+        // Give the tailer time to start and the bootstrap read to complete.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        // Append an assistant line.
+        std::fs::write(
+            &path,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}
+"#,
+        )
+        .unwrap();
+
+        // Wait up to 3s for the SSE chunk to arrive.
+        let mut got_turn_added = false;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        while tokio::time::Instant::now() < deadline {
+            if let Ok(Some(chunk)) =
+                tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv()).await
+            {
+                if chunk.contains("turn-added") {
+                    got_turn_added = true;
+                    break;
+                }
+            }
+        }
+        assert!(got_turn_added, "expected SSE to emit turn-added within 3s");
         handle.shutdown();
     }
 }

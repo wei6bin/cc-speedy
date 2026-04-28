@@ -112,3 +112,83 @@ pub async fn api_turn(
 
     Ok(Json(detail))
 }
+
+use axum::response::sse::{Event, KeepAlive, Sse};
+use futures::stream::Stream;
+use std::convert::Infallible;
+
+/// `GET /session/{id}/stream` — SSE stream of `TailEvent`s.
+pub async fn sse_stream(
+    State(state): State<super::WebState>,
+    Path(session_id): Path<String>,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, StatusCode> {
+    use tokio_stream::StreamExt;
+
+    let sessions = state
+        .sessions
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let session = sessions
+        .iter()
+        .find(|s| s.session_id == session_id)
+        .ok_or(StatusCode::NOT_FOUND)?
+        .clone();
+    let jsonl = match session.source {
+        crate::unified::SessionSource::ClaudeCode | crate::unified::SessionSource::Copilot => {
+            session.jsonl_path.clone().ok_or(StatusCode::NOT_FOUND)?
+        }
+        crate::unified::SessionSource::OpenCode => return Err(StatusCode::NOT_IMPLEMENTED),
+    };
+
+    let tailer = state
+        .tailer_registry
+        .ensure(&session_id, session.source.clone(), jsonl.into())
+        .await;
+    let rx = tailer.subscribe(); // bumps refcount; receiver matched by Drop in WithDropRelease
+
+    let stream = tokio_stream::wrappers::BroadcastStream::new(rx).map(|item| match item {
+        Ok(ev) => {
+            let payload = serde_json::to_string(&ev).unwrap_or_else(|_| "{}".to_string());
+            let kind = match &ev {
+                super::tailer::TailEvent::TurnAdded { .. } => "turn-added",
+                super::tailer::TailEvent::TurnUpdated { .. } => "turn-updated",
+                super::tailer::TailEvent::LivenessChanged { .. } => "liveness",
+            };
+            Ok(Event::default().event(kind).data(payload))
+        }
+        Err(_) => Ok(Event::default().event("lag").data("{}")),
+    });
+
+    let stream = WithDropRelease::new(stream, tailer);
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+/// Wrapper that calls `Tailer::release()` when dropped, decrementing
+/// the refcount so the tailer's self-cleanup loop can wind down.
+pub struct WithDropRelease<S> {
+    inner: S,
+    tailer: std::sync::Arc<super::tailer::Tailer>,
+}
+
+impl<S> WithDropRelease<S> {
+    fn new(inner: S, tailer: std::sync::Arc<super::tailer::Tailer>) -> Self {
+        Self { inner, tailer }
+    }
+}
+
+impl<S: Stream + Unpin> Stream for WithDropRelease<S> {
+    type Item = S::Item;
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        std::pin::Pin::new(&mut self.inner).poll_next(cx)
+    }
+}
+
+impl<S> Drop for WithDropRelease<S> {
+    fn drop(&mut self) {
+        self.tailer.release();
+    }
+}

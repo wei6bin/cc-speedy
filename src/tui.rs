@@ -2694,6 +2694,9 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
+        // Same pattern as git_cache: clone-and-drop-the-lock so we don't hold
+        // it across the two draw_list calls (the polling task and one-shot
+        // detect both write to this cache).
         let liveness_cache = app
             .liveness_cache
             .lock()

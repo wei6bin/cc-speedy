@@ -1,3 +1,4 @@
+use crate::refresh::{self, RefreshResult};
 use crate::theme;
 use crate::unified::{list_all_sessions, SessionSource, UnifiedSession};
 use anyhow::Result;
@@ -15,8 +16,10 @@ use ratatui::{
     Terminal,
 };
 use std::io::stdout;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use tokio::sync::mpsc;
 
 #[derive(PartialEq, Copy, Clone)]
 enum Focus {
@@ -160,6 +163,13 @@ struct AppState {
     /// Index of the focused block in `turn_detail.blocks`. 0 by default; reset
     /// on every turn navigation.
     turn_detail_focused: usize,
+    /// Global in-flight guard for the session re-scan triggered by `R` / `F5`.
+    /// Lighter than the per-session HashSet pattern (`generating`,
+    /// `insights_loading`) because refresh is one global action.
+    refreshing: Arc<AtomicBool>,
+    /// Channel for receiving completed re-scan results from the background task.
+    refresh_tx: mpsc::UnboundedSender<RefreshResult>,
+    refresh_rx: mpsc::UnboundedReceiver<RefreshResult>,
 }
 
 impl AppState {
@@ -188,6 +198,7 @@ impl AppState {
         let parent_of = crate::store::load_all_links(&conn).unwrap_or_default();
         let insights_cache = crate::store::load_all_insights(&conn).unwrap_or_default();
         let settings = crate::settings::load(&conn);
+        let (refresh_tx, refresh_rx) = mpsc::unbounded_channel::<RefreshResult>();
         let mut state = Self {
             filtered_active: (0..n).collect(),
             filtered_archived: vec![],
@@ -245,6 +256,9 @@ impl AppState {
             turn_detail_scroll: 0,
             turn_detail_expanded: std::collections::HashSet::new(),
             turn_detail_focused: 0,
+            refreshing: Arc::new(AtomicBool::new(false)),
+            refresh_tx,
+            refresh_rx,
         };
         // Split archived out of the active list on startup so the "all" view
         // correctly shows archived sessions in the bottom-left panel.
@@ -550,6 +564,30 @@ impl AppState {
                 self.sessions.get(raw)
             }
         }
+    }
+
+    /// Trigger a non-blocking re-scan of all session sources. If a refresh is
+    /// already in flight, this call is a no-op (the user pressing `R` while a
+    /// scan is running shouldn't stack up scans).
+    pub fn refresh_sessions(&self) {
+        if self.refreshing.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let prior: Vec<UnifiedSession> = self.sessions.clone();
+        let tx = self.refresh_tx.clone();
+        let flag = self.refreshing.clone();
+
+        tokio::spawn(async move {
+            let new_sessions = tokio::task::spawn_blocking(|| {
+                crate::unified::list_all_sessions().unwrap_or_default()
+            })
+            .await
+            .unwrap_or_default();
+
+            let result = refresh::compute_refresh_diff(&prior, new_sessions);
+            let _ = tx.send(result);
+            flag.store(false, Ordering::SeqCst);
+        });
     }
 }
 

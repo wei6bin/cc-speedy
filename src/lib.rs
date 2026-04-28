@@ -20,3 +20,4 @@ pub mod turn_detail;
 pub mod unified;
 pub mod update;
 pub mod util;
+pub mod web;

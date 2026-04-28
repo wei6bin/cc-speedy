@@ -1,3 +1,4 @@
+use crate::liveness::{self, CachedLiveness, Liveness};
 use crate::theme;
 use crate::unified::{list_all_sessions, SessionSource, UnifiedSession};
 use anyhow::Result;
@@ -17,6 +18,46 @@ use ratatui::{
 use std::io::stdout;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use tokio::sync::mpsc;
+
+/// Subset of `UnifiedSession` shipped from the UI thread to the liveness
+/// polling task on each visibility change. Cheap to clone (~5 small
+/// fields per visible session).
+#[derive(Clone)]
+struct VisibleSnapshot {
+    session_id: String,
+    source: crate::unified::SessionSource,
+    jsonl_path: Option<String>,
+    modified: std::time::SystemTime,
+}
+
+impl VisibleSnapshot {
+    fn from_session(s: &crate::unified::UnifiedSession) -> Self {
+        Self {
+            session_id: s.session_id.clone(),
+            source: s.source.clone(),
+            jsonl_path: s.jsonl_path.clone(),
+            modified: s.modified,
+        }
+    }
+
+    /// Adapt to a temporary `UnifiedSession` for `liveness::detect`.
+    fn as_unified(&self) -> crate::unified::UnifiedSession {
+        crate::unified::UnifiedSession {
+            session_id: self.session_id.clone(),
+            project_name: String::new(),
+            project_path: String::new(),
+            modified: self.modified,
+            message_count: 0,
+            first_user_msg: String::new(),
+            summary: String::new(),
+            git_branch: String::new(),
+            source: self.source.clone(),
+            jsonl_path: self.jsonl_path.clone(),
+            archived: false,
+        }
+    }
+}
 
 #[derive(PartialEq, Copy, Clone)]
 enum Focus {
@@ -160,6 +201,15 @@ struct AppState {
     /// Index of the focused block in `turn_detail.blocks`. 0 by default; reset
     /// on every turn navigation.
     turn_detail_focused: usize,
+    /// Cached liveness keyed by `session_id`. Populated by the polling
+    /// task; read by the renderer with idle-decay applied.
+    liveness_cache: Arc<Mutex<std::collections::HashMap<String, CachedLiveness>>>,
+    /// Channel: polling task → UI thread. Carries per-tick liveness updates.
+    liveness_rx: mpsc::UnboundedReceiver<std::collections::HashMap<String, Liveness>>,
+    /// Channel: UI thread → polling task. Sends the latest visibility snapshot.
+    visible_tx: mpsc::UnboundedSender<Vec<VisibleSnapshot>>,
+    /// Cached visibility set used to detect changes and avoid re-sending.
+    last_visible_ids: std::collections::HashSet<String>,
 }
 
 impl AppState {
@@ -188,6 +238,11 @@ impl AppState {
         let parent_of = crate::store::load_all_links(&conn).unwrap_or_default();
         let insights_cache = crate::store::load_all_insights(&conn).unwrap_or_default();
         let settings = crate::settings::load(&conn);
+        let (liveness_tx, liveness_rx) =
+            mpsc::unbounded_channel::<std::collections::HashMap<String, Liveness>>();
+        let (visible_tx, visible_rx) = mpsc::unbounded_channel::<Vec<VisibleSnapshot>>();
+        let liveness_cache: Arc<Mutex<std::collections::HashMap<String, CachedLiveness>>> =
+            Arc::new(Mutex::new(std::collections::HashMap::new()));
         let mut state = Self {
             filtered_active: (0..n).collect(),
             filtered_archived: vec![],
@@ -245,11 +300,16 @@ impl AppState {
             turn_detail_scroll: 0,
             turn_detail_expanded: std::collections::HashSet::new(),
             turn_detail_focused: 0,
+            liveness_cache: liveness_cache.clone(),
+            liveness_rx,
+            visible_tx,
+            last_visible_ids: std::collections::HashSet::new(),
         };
         // Split archived out of the active list on startup so the "all" view
         // correctly shows archived sessions in the bottom-left panel.
         state.apply_filter();
         state.rebuild_projects();
+        spawn_liveness_polling_task(liveness_tx, visible_rx);
         Ok(state)
     }
 
@@ -551,6 +611,78 @@ impl AppState {
             }
         }
     }
+
+    /// Pull pending liveness updates from the polling task and merge
+    /// them into `liveness_cache` with the current `Instant`. Called
+    /// once per event-loop iteration.
+    pub fn drain_liveness(&mut self) {
+        let now = std::time::Instant::now();
+        let mut updates: std::collections::HashMap<String, Liveness> = Default::default();
+        while let Ok(batch) = self.liveness_rx.try_recv() {
+            for (id, state) in batch {
+                updates.insert(id, state);
+            }
+        }
+        if updates.is_empty() {
+            return;
+        }
+        let mut cache = self
+            .liveness_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for (id, state) in updates {
+            cache.insert(
+                id,
+                CachedLiveness {
+                    state,
+                    observed_at: now,
+                },
+            );
+        }
+    }
+
+    /// Compute the current visibility snapshot — a deduped subset of
+    /// `self.sessions` corresponding to rows likely visible in the
+    /// active or archived list. Uses a fixed slack instead of measuring
+    /// the rendered viewport height (good enough for any reasonable
+    /// terminal size; over-eager polling is cheap).
+    fn compute_visible(&self) -> Vec<VisibleSnapshot> {
+        const SLACK: usize = 25;
+        let mut snap: Vec<VisibleSnapshot> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        for (list_state, filtered) in [
+            (&self.list_state_active, &self.filtered_active),
+            (&self.list_state_archived, &self.filtered_archived),
+        ] {
+            let center = list_state.selected().unwrap_or(0);
+            let lo = center.saturating_sub(SLACK);
+            let hi = (center + SLACK).min(filtered.len());
+            for &raw in filtered[lo..hi].iter() {
+                if let Some(s) = self.sessions.get(raw) {
+                    if seen.insert(s.session_id.clone()) {
+                        snap.push(VisibleSnapshot::from_session(s));
+                    }
+                }
+            }
+        }
+
+        snap
+    }
+
+    /// Push the current visibility snapshot to the polling task, but
+    /// only when the set of session IDs actually changed since last
+    /// push. Called once per event-loop iteration after `drain_*`.
+    pub fn push_visible_if_changed(&mut self) {
+        let snap = self.compute_visible();
+        let new_ids: std::collections::HashSet<String> =
+            snap.iter().map(|s| s.session_id.clone()).collect();
+        if new_ids == self.last_visible_ids {
+            return;
+        }
+        self.last_visible_ids = new_ids;
+        let _ = self.visible_tx.send(snap);
+    }
 }
 
 /// Split a filter query into `(tag_tokens, text_tokens)`. Whitespace-delimited
@@ -620,6 +752,52 @@ pub fn build_project_rows(
         }
     }
     acc.into_values().collect()
+}
+
+/// Spawn the background liveness polling task. The task ticks every
+/// `LIVE_WINDOW_SECS` seconds and runs `liveness::detect` on whichever
+/// sessions are currently visible (received via `visible_rx`). Results
+/// stream back to the UI thread via `liveness_tx`. The task ends when
+/// either channel closes (i.e., when the app shuts down).
+fn spawn_liveness_polling_task(
+    liveness_tx: mpsc::UnboundedSender<std::collections::HashMap<String, Liveness>>,
+    mut visible_rx: mpsc::UnboundedReceiver<Vec<VisibleSnapshot>>,
+) {
+    use tokio::time::{interval, Duration, MissedTickBehavior};
+
+    tokio::spawn(async move {
+        let mut tick = interval(Duration::from_secs(liveness::LIVE_WINDOW_SECS));
+        tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let mut current_visible: Vec<VisibleSnapshot> = Vec::new();
+
+        loop {
+            tokio::select! {
+                _ = tick.tick() => {
+                    if current_visible.is_empty() {
+                        continue;
+                    }
+                    let snapshot = current_visible.clone();
+                    let tx = liveness_tx.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let mut out = std::collections::HashMap::new();
+                        for vs in &snapshot {
+                            let session = vs.as_unified();
+                            out.insert(vs.session_id.clone(), liveness::detect(&session));
+                        }
+                        let _ = tx.send(out);
+                    });
+                }
+                Some(latest) = visible_rx.recv() => {
+                    let mut latest = latest;
+                    while let Ok(newer) = visible_rx.try_recv() {
+                        latest = newer;
+                    }
+                    current_visible = latest;
+                }
+                else => break,
+            }
+        }
+    });
 }
 
 /// Walk every unique project_path across all sessions and dispatch a git
@@ -897,6 +1075,8 @@ async fn run_event_loop(
     app: &mut AppState,
 ) -> Result<()> {
     loop {
+        app.drain_liveness();
+        app.push_visible_if_changed();
         maybe_refresh_selected_git(app);
         terminal.draw(|f| draw(f, app))?;
 

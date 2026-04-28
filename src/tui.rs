@@ -1549,6 +1549,17 @@ async fn run_event_loop(
                         app.status_msg = Some(("refreshing git…".to_string(), Instant::now()));
                     }
 
+                    // R / F5: re-scan all session sources without restarting the TUI.
+                    // Active in Normal, Library, and Projects modes.
+                    (AppMode::Normal, KeyModifiers::NONE, KeyCode::Char('R'))
+                    | (AppMode::Library, KeyModifiers::NONE, KeyCode::Char('R'))
+                    | (AppMode::Projects, KeyModifiers::NONE, KeyCode::Char('R'))
+                    | (AppMode::Normal, KeyModifiers::NONE, KeyCode::F(5))
+                    | (AppMode::Library, KeyModifiers::NONE, KeyCode::F(5))
+                    | (AppMode::Projects, KeyModifiers::NONE, KeyCode::F(5)) => {
+                        app.refresh_sessions();
+                    }
+
                     // i: toggle the Insights panel above the Summary
                     (AppMode::Normal, KeyModifiers::NONE, KeyCode::Char('i')) => {
                         app.insights_visible = !app.insights_visible;

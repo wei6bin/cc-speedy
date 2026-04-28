@@ -217,6 +217,9 @@ pub fn copilot_tail_has_open_turn(tail: &str) -> bool {
 
     // Note: any partial first line at the start of the tail will fail
     // to parse as JSON and be skipped by the `Err(_) => continue` arm.
+    // `idx` increments on every line including blank/parse-failed ones;
+    // that's fine because the comparison `a > t` only uses relative
+    // ordering and both branches observe the same indexing.
     for (idx, line) in tail.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() {

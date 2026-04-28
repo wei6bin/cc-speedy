@@ -170,10 +170,14 @@ struct AppState {
     /// Channel for receiving completed re-scan results from the background task.
     refresh_tx: mpsc::UnboundedSender<Result<RefreshResult, String>>,
     refresh_rx: mpsc::UnboundedReceiver<Result<RefreshResult, String>>,
-    /// `true` after the first refresh result has been drained at startup. Used
-    /// to gate one-time startup work (the git-status batch) so it runs once
-    /// the initial session list has loaded.
+    /// `true` once the first refresh attempt has completed, regardless of
+    /// success or failure. Gates the "Loading sessions…" placeholder so it
+    /// disappears even when the initial scan errors out.
     did_initial_load: bool,
+    /// `true` once the git-status batch has been kicked off after a successful
+    /// initial scan. Decoupled from `did_initial_load` so a transient first-
+    /// scan error doesn't permanently disarm the git batch.
+    did_initial_git_batch: bool,
 }
 
 /// RAII guard that clears the `refreshing` atomic flag when dropped, so a
@@ -277,6 +281,7 @@ impl AppState {
             refresh_tx,
             refresh_rx,
             did_initial_load: false,
+            did_initial_git_batch: false,
         };
         // Split archived out of the active list on startup so the "all" view
         // correctly shows archived sessions in the bottom-left panel.
@@ -669,13 +674,18 @@ impl AppState {
                 };
                 self.status_msg = Some((toast_text, Instant::now()));
 
-                if !self.did_initial_load {
-                    self.did_initial_load = true;
+                self.did_initial_load = true;
+                if !self.did_initial_git_batch {
+                    self.did_initial_git_batch = true;
                     spawn_git_status_batch(self);
                 }
             }
             Err(msg) => {
                 self.status_msg = Some((format!("Refresh failed: {msg}"), Instant::now()));
+                // Hide the "Loading sessions…" placeholder so the user isn't
+                // misled into thinking work is still in progress. The git
+                // batch stays armed until the next successful scan.
+                self.did_initial_load = true;
             }
         }
     }

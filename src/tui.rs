@@ -2470,6 +2470,11 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
         AppMode::ActionMenu => ("".to_string(), " cc-speedy "),
         AppMode::Settings => ("".to_string(), " cc-speedy — Settings "),
         AppMode::Library => {
+            let prefix = if app.refreshing.load(Ordering::SeqCst) {
+                "↻ "
+            } else {
+                ""
+            };
             let cat_label = match app.library_category.as_deref() {
                 Some("decision_points") => "decisions",
                 Some("lessons_gotchas") => "lessons",
@@ -2478,8 +2483,8 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
             };
             let n = app.library_filtered.len();
             (
-                format!("  [{}]  {} entr{}  (/: filter  0:all  1:dec  2:lsn  3:tol  Enter: jump  Esc: exit)",
-                        cat_label, n, if n == 1 { "y" } else { "ies" }),
+                format!("{}  [{}]  {} entr{}  (/: filter  0:all  1:dec  2:lsn  3:tol  Enter: jump  Esc: exit)",
+                        prefix, cat_label, n, if n == 1 { "y" } else { "ies" }),
                 " Learning Library ",
             )
         }
@@ -2488,6 +2493,11 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
             " Library — Filter  [Esc: clear  Enter: apply] ",
         ),
         AppMode::Projects => {
+            let prefix = if app.refreshing.load(Ordering::SeqCst) {
+                "↻ "
+            } else {
+                ""
+            };
             let sort_label = match app.projects_sort {
                 ProjectSort::LastActive => "last active",
                 ProjectSort::SessionCount => "session count",
@@ -2502,7 +2512,8 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
             let n = app.projects_filtered.len();
             (
                 format!(
-                    "  sort: {}  ·  src: {}  ·  {} project{}  (/: search  s: sort  →: enter  q: quit)",
+                    "{}  sort: {}  ·  src: {}  ·  {} project{}  (/: search  s: sort  →: enter  q: quit)",
+                    prefix,
                     sort_label,
                     src_tag,
                     n,
@@ -2538,6 +2549,11 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
         AppMode::Help => ("".to_string(), " cc-speedy — Help "),
         AppMode::TurnDetail => ("".to_string(), " cc-speedy "),
         AppMode::Normal => {
+            let prefix = if app.refreshing.load(Ordering::SeqCst) {
+                "↻ "
+            } else {
+                ""
+            };
             let src_tag = match &app.source_filter {
                 None => "all",
                 Some(crate::unified::SessionSource::ClaudeCode) => "CC",
@@ -2547,17 +2563,18 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
             let hint = if let Some(ref pp) = app.project_filter {
                 if app.filter.is_empty() {
                     format!(
-                        "  project: {}  [src: {}]  (← projects · / search)",
+                        "{}  project: {}  [src: {}]  (← projects · / search)",
+                        prefix,
                         crate::util::path_last_n(pp, 2),
                         src_tag
                     )
                 } else {
-                    format!("  filter: {}  (Esc clear)", app.filter)
+                    format!("{}  filter: {}  (Esc clear)", prefix, app.filter)
                 }
             } else if app.filter.is_empty() {
-                "  (F1: help  /: filter  ?: grep  L: library)".to_string()
+                format!("{}  (F1: help  /: filter  ?: grep  L: library)", prefix)
             } else {
-                format!("  filter: {}", app.filter)
+                format!("{}  filter: {}", prefix, app.filter)
             };
             (hint, " cc-speedy ")
         }

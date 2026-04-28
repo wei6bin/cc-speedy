@@ -42,6 +42,10 @@ impl VisibleSnapshot {
     }
 
     /// Adapt to a temporary `UnifiedSession` for `liveness::detect`.
+    /// Only `source`, `jsonl_path`, and `modified` are read by the
+    /// detector today; the other fields are filled with defaults. If
+    /// `liveness::detect` ever starts reading additional fields, this
+    /// adapter will silently produce wrong results — update it then.
     fn as_unified(&self) -> crate::unified::UnifiedSession {
         crate::unified::UnifiedSession {
             session_id: self.session_id.clone(),

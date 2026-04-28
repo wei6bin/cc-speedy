@@ -4156,6 +4156,19 @@ fn draw_help_popup(f: &mut ratatui::Frame, area: Rect) {
             Span::raw("    "),
             Span::styled("*", theme::pin_style()),
             Span::raw("  pinned    "),
+            Span::styled(
+                "▶",
+                Style::default().fg(ratatui::style::Color::Rgb(0xa6, 0xe3, 0xa1)),
+            ),
+            Span::raw("  agent live    "),
+            Span::styled(
+                "◦",
+                Style::default().fg(ratatui::style::Color::Rgb(0x89, 0xdc, 0xeb)),
+            ),
+            Span::raw("  active recently"),
+        ]),
+        Line::from(vec![
+            Span::raw("    "),
             Span::styled("✓", Style::default().fg(theme::TITLE)),
             Span::raw("  has learnings    "),
             Span::styled("◆", Style::default().fg(theme::OBSIDIAN_PURPLE)),

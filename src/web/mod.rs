@@ -207,4 +207,19 @@ mod tests {
         assert_eq!(resp.status(), 404);
         handle.shutdown();
     }
+
+    #[tokio::test]
+    async fn api_turn_path_traversal_rejected() {
+        let handle = start(empty_state()).await.unwrap();
+        // URL-encoded `../../etc/passwd` as a session id; the handler
+        // looks up the id in the in-memory session list before resolving
+        // any path, so this can never reach `Path::new`.
+        let url = format!(
+            "http://{}/api/session/..%2F..%2Fetc%2Fpasswd/turns/0",
+            handle.addr
+        );
+        let resp = reqwest::get(&url).await.unwrap();
+        assert!(resp.status().is_client_error());
+        handle.shutdown();
+    }
 }

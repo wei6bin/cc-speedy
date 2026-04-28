@@ -3,10 +3,11 @@
 //! so the logic is unit-testable without spinning up the TUI.
 
 use crate::unified::UnifiedSession;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::time::SystemTime;
 
 /// Outcome of a session re-scan, ready to apply to `AppState`.
+#[derive(Debug)]
 pub struct RefreshResult {
     pub sessions: Vec<UnifiedSession>,
     pub new_count: usize,
@@ -23,7 +24,6 @@ pub struct RefreshResult {
 /// Removed sessions are not counted; the caller drops them implicitly by
 /// replacing the list.
 pub fn compute_refresh_diff(prior: &[UnifiedSession], new: Vec<UnifiedSession>) -> RefreshResult {
-    let prior_ids: HashSet<&str> = prior.iter().map(|s| s.session_id.as_str()).collect();
     let prior_modified: HashMap<&str, SystemTime> = prior
         .iter()
         .map(|s| (s.session_id.as_str(), s.modified))
@@ -32,14 +32,10 @@ pub fn compute_refresh_diff(prior: &[UnifiedSession], new: Vec<UnifiedSession>) 
     let mut new_count = 0;
     let mut updated_count = 0;
     for s in &new {
-        if !prior_ids.contains(s.session_id.as_str()) {
-            new_count += 1;
-        } else if prior_modified
-            .get(s.session_id.as_str())
-            .map(|t| s.modified > *t)
-            .unwrap_or(false)
-        {
-            updated_count += 1;
+        match prior_modified.get(s.session_id.as_str()) {
+            None => new_count += 1,
+            Some(prior_t) if s.modified > *prior_t => updated_count += 1,
+            _ => {}
         }
     }
 

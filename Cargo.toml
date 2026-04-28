@@ -25,6 +25,10 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-feature
 flate2 = "1"
 tar = "0.4"
 tempfile = "3"
+axum = "0.8"
+tokio-stream = "0.1"
+arboard = "3"
+futures = "0.3"
 
 [dev-dependencies]
 rusqlite = { version = "0.31", features = ["bundled"] }

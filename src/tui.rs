@@ -168,8 +168,21 @@ struct AppState {
     /// `insights_loading`) because refresh is one global action.
     refreshing: Arc<AtomicBool>,
     /// Channel for receiving completed re-scan results from the background task.
-    refresh_tx: mpsc::UnboundedSender<RefreshResult>,
-    refresh_rx: mpsc::UnboundedReceiver<RefreshResult>,
+    refresh_tx: mpsc::UnboundedSender<Result<RefreshResult, String>>,
+    refresh_rx: mpsc::UnboundedReceiver<Result<RefreshResult, String>>,
+}
+
+/// RAII guard that clears the `refreshing` atomic flag when dropped, so a
+/// panic inside the spawned scan task can't leave the flag stuck-set and
+/// permanently block future refreshes.
+struct RefreshInflightGuard {
+    flag: Arc<AtomicBool>,
+}
+
+impl Drop for RefreshInflightGuard {
+    fn drop(&mut self) {
+        self.flag.store(false, Ordering::SeqCst);
+    }
 }
 
 impl AppState {
@@ -198,7 +211,7 @@ impl AppState {
         let parent_of = crate::store::load_all_links(&conn).unwrap_or_default();
         let insights_cache = crate::store::load_all_insights(&conn).unwrap_or_default();
         let settings = crate::settings::load(&conn);
-        let (refresh_tx, refresh_rx) = mpsc::unbounded_channel::<RefreshResult>();
+        let (refresh_tx, refresh_rx) = mpsc::unbounded_channel::<Result<RefreshResult, String>>();
         let mut state = Self {
             filtered_active: (0..n).collect(),
             filtered_archived: vec![],
@@ -578,15 +591,21 @@ impl AppState {
         let flag = self.refreshing.clone();
 
         tokio::spawn(async move {
-            let new_sessions = tokio::task::spawn_blocking(|| {
-                crate::unified::list_all_sessions().unwrap_or_default()
-            })
-            .await
-            .unwrap_or_default();
+            // Guard ensures the in-flight flag is cleared even if anything
+            // below panics — otherwise a stuck flag would block all future
+            // refreshes until the TUI is restarted.
+            let _guard = RefreshInflightGuard { flag };
 
-            let result = refresh::compute_refresh_diff(&prior, new_sessions);
-            let _ = tx.send(result);
-            flag.store(false, Ordering::SeqCst);
+            let outcome: Result<Vec<UnifiedSession>, String> =
+                match tokio::task::spawn_blocking(crate::unified::list_all_sessions).await {
+                    Ok(Ok(sessions)) => Ok(sessions),
+                    Ok(Err(e)) => Err(format!("scan failed: {e}")),
+                    Err(e) => Err(format!("scan task panicked: {e}")),
+                };
+
+            let payload = outcome.map(|new| refresh::compute_refresh_diff(&prior, new));
+            // Only fails if the receiver was dropped (app shutting down).
+            let _ = tx.send(payload);
         });
     }
 
@@ -595,33 +614,60 @@ impl AppState {
     /// `session_id`, and emit a status-line toast. Called once per event-loop
     /// iteration before drawing.
     pub fn drain_refresh_results(&mut self) {
-        let prior_selection_id: Option<String> =
-            self.selected_session().map(|s| s.session_id.clone());
+        // Capture selection IDs from BOTH lists so the user's selection is
+        // preserved regardless of which panel currently has focus.
+        let prior_active_id: Option<String> = self
+            .list_state_active
+            .selected()
+            .and_then(|i| self.filtered_active.get(i).copied())
+            .and_then(|raw| self.sessions.get(raw))
+            .map(|s| s.session_id.clone());
+        let prior_archived_id: Option<String> = self
+            .list_state_archived
+            .selected()
+            .and_then(|i| self.filtered_archived.get(i).copied())
+            .and_then(|raw| self.sessions.get(raw))
+            .map(|s| s.session_id.clone());
 
-        let mut latest: Option<RefreshResult> = None;
+        let mut latest: Option<Result<RefreshResult, String>> = None;
         while let Ok(r) = self.refresh_rx.try_recv() {
             latest = Some(r);
         }
-        let Some(r) = latest else { return };
+        let Some(outcome) = latest else { return };
 
-        let total = r.sessions.len();
-        self.sessions = r.sessions;
-        self.apply_filter();
+        match outcome {
+            Ok(r) => {
+                let total = r.sessions.len();
+                self.sessions = r.sessions;
+                self.apply_filter();
 
-        let target = prior_selection_id.as_deref();
-        let new_active =
-            refresh::select_index_for_session_id(&self.filtered_active, &self.sessions, target);
-        self.list_state_active.select(new_active);
+                let new_active = refresh::select_index_for_session_id(
+                    &self.filtered_active,
+                    &self.sessions,
+                    prior_active_id.as_deref(),
+                );
+                self.list_state_active.select(new_active);
+                let new_archived = refresh::select_index_for_session_id(
+                    &self.filtered_archived,
+                    &self.sessions,
+                    prior_archived_id.as_deref(),
+                );
+                self.list_state_archived.select(new_archived);
 
-        let toast_text = if r.new_count == 0 && r.updated_count == 0 {
-            format!("Refreshed: {total} sessions (no changes)")
-        } else {
-            format!(
-                "Refreshed: {total} sessions (+{} new, {} updated)",
-                r.new_count, r.updated_count
-            )
-        };
-        self.status_msg = Some((toast_text, Instant::now()));
+                let toast_text = if r.new_count == 0 && r.updated_count == 0 {
+                    format!("Refreshed: {total} sessions (no changes)")
+                } else {
+                    format!(
+                        "Refreshed: {total} sessions (+{} new, {} updated)",
+                        r.new_count, r.updated_count
+                    )
+                };
+                self.status_msg = Some((toast_text, Instant::now()));
+            }
+            Err(msg) => {
+                self.status_msg = Some((format!("Refresh failed: {msg}"), Instant::now()));
+            }
+        }
     }
 }
 

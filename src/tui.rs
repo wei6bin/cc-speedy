@@ -589,6 +589,40 @@ impl AppState {
             flag.store(false, Ordering::SeqCst);
         });
     }
+
+    /// Pull any pending refresh results out of the channel, replace the
+    /// in-memory session list, re-apply filters, restore selection by
+    /// `session_id`, and emit a status-line toast. Called once per event-loop
+    /// iteration before drawing.
+    pub fn drain_refresh_results(&mut self) {
+        let prior_selection_id: Option<String> =
+            self.selected_session().map(|s| s.session_id.clone());
+
+        let mut latest: Option<RefreshResult> = None;
+        while let Ok(r) = self.refresh_rx.try_recv() {
+            latest = Some(r);
+        }
+        let Some(r) = latest else { return };
+
+        let total = r.sessions.len();
+        self.sessions = r.sessions;
+        self.apply_filter();
+
+        let target = prior_selection_id.as_deref();
+        let new_active =
+            refresh::select_index_for_session_id(&self.filtered_active, &self.sessions, target);
+        self.list_state_active.select(new_active);
+
+        let toast_text = if r.new_count == 0 && r.updated_count == 0 {
+            format!("Refreshed: {total} sessions (no changes)")
+        } else {
+            format!(
+                "Refreshed: {total} sessions (+{} new, {} updated)",
+                r.new_count, r.updated_count
+            )
+        };
+        self.status_msg = Some((toast_text, Instant::now()));
+    }
 }
 
 /// Split a filter query into `(tag_tokens, text_tokens)`. Whitespace-delimited
@@ -935,6 +969,7 @@ async fn run_event_loop(
     app: &mut AppState,
 ) -> Result<()> {
     loop {
+        app.drain_refresh_results();
         maybe_refresh_selected_git(app);
         terminal.draw(|f| draw(f, app))?;
 

@@ -684,8 +684,39 @@ impl AppState {
         if new_ids == self.last_visible_ids {
             return;
         }
+
+        // Identify sessions that just entered the viewport — they get an
+        // immediate one-shot detect to avoid the up-to-5s polling lag.
+        let newly_visible: Vec<VisibleSnapshot> = snap
+            .iter()
+            .filter(|s| !self.last_visible_ids.contains(&s.session_id))
+            .cloned()
+            .collect();
+
         self.last_visible_ids = new_ids;
         let _ = self.visible_tx.send(snap);
+
+        if !newly_visible.is_empty() {
+            let cache = self.liveness_cache.clone();
+            tokio::task::spawn_blocking(move || {
+                let now = std::time::Instant::now();
+                let mut updates: Vec<(String, Liveness)> = Vec::new();
+                for vs in &newly_visible {
+                    let session = vs.as_unified();
+                    updates.push((vs.session_id.clone(), liveness::detect(&session)));
+                }
+                let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+                for (id, state) in updates {
+                    guard.insert(
+                        id,
+                        CachedLiveness {
+                            state,
+                            observed_at: now,
+                        },
+                    );
+                }
+            });
+        }
     }
 }
 

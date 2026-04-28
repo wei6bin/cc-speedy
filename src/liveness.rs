@@ -116,9 +116,26 @@ pub fn detect_cc(path: &Path) -> Liveness {
     }
 }
 
-/// Copilot detector. Stub — full implementation in Task 3.
-pub fn detect_copilot(_path: &Path) -> Liveness {
-    Liveness::Idle
+/// Copilot detector. Same mtime gate as CC; tail-parses
+/// `events.jsonl` for an unclosed `assistant.message`.
+pub fn detect_copilot(path: &Path) -> Liveness {
+    let mtime = match std::fs::metadata(path).and_then(|m| m.modified()) {
+        Ok(t) => t,
+        Err(_) => return Liveness::Idle,
+    };
+    let coarse = classify_by_mtime(mtime, Liveness::Live);
+    if coarse != Liveness::Live {
+        return coarse;
+    }
+    let tail = match read_tail(path) {
+        Some(s) => s,
+        None => return Liveness::Recent,
+    };
+    if copilot_tail_has_open_turn(&tail) {
+        Liveness::Live
+    } else {
+        Liveness::Recent
+    }
 }
 
 /// Classify the trailing CC JSONL bytes as having an open `tool_use`
@@ -186,6 +203,41 @@ pub fn cc_tail_has_open_tool_use(tail: &str) -> bool {
     }
 
     !pending.is_empty()
+}
+
+/// Classify the trailing Copilot `events.jsonl` content as having an
+/// open turn (last `assistant.message` not yet followed by a
+/// `tool.execution_complete`).
+///
+/// Pure function — takes the tail content as a string. Returns `true`
+/// when a turn is open, `false` otherwise (including parse errors).
+pub fn copilot_tail_has_open_turn(tail: &str) -> bool {
+    let mut last_assistant: Option<usize> = None;
+    let mut last_tool_complete: Option<usize> = None;
+
+    // Note: any partial first line at the start of the tail will fail
+    // to parse as JSON and be skipped by the `Err(_) => continue` arm.
+    for (idx, line) in tail.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let v: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        match v.get("type").and_then(|x| x.as_str()) {
+            Some("assistant.message") => last_assistant = Some(idx),
+            Some("tool.execution_complete") => last_tool_complete = Some(idx),
+            _ => {}
+        }
+    }
+
+    match (last_assistant, last_tool_complete) {
+        (Some(a), Some(t)) => a > t,
+        (Some(_), None) => true,
+        _ => false,
+    }
 }
 
 /// Read the last [`TAIL_BYTES`] of a file. Returns the bytes as a
@@ -340,5 +392,52 @@ not json garbage
 {"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"a","content":"ok"}]}}
 "#;
         assert!(cc_tail_has_open_tool_use(tail));
+    }
+
+    #[test]
+    fn copilot_tail_open_when_assistant_then_no_tool_complete() {
+        let tail = r#"{"type":"user.message"}
+{"type":"assistant.message"}
+"#;
+        assert!(copilot_tail_has_open_turn(tail));
+    }
+
+    #[test]
+    fn copilot_tail_closed_when_tool_complete_after_assistant() {
+        let tail = r#"{"type":"user.message"}
+{"type":"assistant.message"}
+{"type":"tool.execution_complete"}
+"#;
+        assert!(!copilot_tail_has_open_turn(tail));
+    }
+
+    #[test]
+    fn copilot_tail_closed_when_no_assistant() {
+        let tail = r#"{"type":"user.message"}
+{"type":"system.notice"}
+"#;
+        assert!(!copilot_tail_has_open_turn(tail));
+    }
+
+    #[test]
+    fn copilot_tail_open_when_only_assistant() {
+        let tail = r#"{"type":"assistant.message"}
+"#;
+        assert!(copilot_tail_has_open_turn(tail));
+    }
+
+    #[test]
+    fn copilot_tail_handles_malformed_lines() {
+        let tail = r#"not json
+{"type":"assistant.message"}
+"#;
+        // First line skipped (partial); the second line is `assistant.message`
+        // and there's no later `tool.execution_complete`.
+        assert!(copilot_tail_has_open_turn(tail));
+    }
+
+    #[test]
+    fn copilot_tail_empty_input_is_closed() {
+        assert!(!copilot_tail_has_open_turn(""));
     }
 }

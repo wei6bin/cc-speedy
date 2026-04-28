@@ -1,6 +1,6 @@
 use crate::refresh::{self, RefreshResult};
 use crate::theme;
-use crate::unified::{list_all_sessions, SessionSource, UnifiedSession};
+use crate::unified::{SessionSource, UnifiedSession};
 use anyhow::Result;
 use crossterm::{
     event::{self, Event, KeyCode, KeyModifiers},
@@ -170,6 +170,10 @@ struct AppState {
     /// Channel for receiving completed re-scan results from the background task.
     refresh_tx: mpsc::UnboundedSender<Result<RefreshResult, String>>,
     refresh_rx: mpsc::UnboundedReceiver<Result<RefreshResult, String>>,
+    /// `true` after the first refresh result has been drained at startup. Used
+    /// to gate one-time startup work (the git-status batch) so it runs once
+    /// the initial session list has loaded.
+    did_initial_load: bool,
 }
 
 /// RAII guard that clears the `refreshing` atomic flag when dropped, so a
@@ -272,6 +276,7 @@ impl AppState {
             refreshing: Arc::new(AtomicBool::new(false)),
             refresh_tx,
             refresh_rx,
+            did_initial_load: false,
         };
         // Split archived out of the active list on startup so the "all" view
         // correctly shows archived sessions in the bottom-left panel.
@@ -663,6 +668,11 @@ impl AppState {
                     )
                 };
                 self.status_msg = Some((toast_text, Instant::now()));
+
+                if !self.did_initial_load {
+                    self.did_initial_load = true;
+                    spawn_git_status_batch(self);
+                }
             }
             Err(msg) => {
                 self.status_msg = Some((format!("Refresh failed: {msg}"), Instant::now()));
@@ -981,8 +991,6 @@ fn maybe_spawn_insights_load(app: &AppState) {
 }
 
 pub async fn run() -> Result<()> {
-    let sessions = list_all_sessions()?;
-
     let conn = crate::store::open_db()?;
     crate::store::migrate_from_files(&conn)?;
 
@@ -992,17 +1000,14 @@ pub async fn run() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = AppState::new(sessions, conn)?;
+    // Boot with an empty list; the first event-loop tick fires a refresh that
+    // populates it. Keeps "load sessions" on a single async path and matches
+    // the TUI invariant that I/O never blocks the UI.
+    let mut app = AppState::new(Vec::new(), conn)?;
+    app.refresh_sessions();
 
-    // Kick off git status checks for each unique project path in parallel.
-    // Cache is shared; results land while the TUI renders. First frame may
-    // show blank indicators; subsequent redraws pick up completed entries.
-    spawn_git_status_batch(&app);
-
-    // Run event loop, always clean up terminal regardless of result
     let result = run_event_loop(&mut terminal, &mut app).await;
 
-    // Always clean up terminal
     let _ = disable_raw_mode();
     let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
     let _ = terminal.show_cursor();
@@ -2642,6 +2647,7 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
 
+        let show_loading = app.sessions.is_empty() && !app.did_initial_load;
         draw_list(
             f,
             list_panes[0],
@@ -2656,6 +2662,7 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
             "Sessions",
             Focus::ActiveList,
             app.focus,
+            show_loading,
         );
         if archived_count > 0 {
             draw_list(
@@ -2672,6 +2679,7 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
                 "Archived",
                 Focus::ArchivedList,
                 app.focus,
+                false,
             );
         }
 
@@ -3031,9 +3039,10 @@ fn draw_list(
     title: &str,
     focus: Focus,
     current_focus: Focus,
+    show_loading_placeholder: bool,
 ) {
     let spinner = spinner_glyph();
-    let items: Vec<ListItem> = indices
+    let mut items: Vec<ListItem> = indices
         .iter()
         .map(|&i| {
             let s = &sessions[i];
@@ -3081,6 +3090,13 @@ fn draw_list(
             ListItem::new(line)
         })
         .collect();
+
+    if items.is_empty() && show_loading_placeholder {
+        items.push(ListItem::new(Span::styled(
+            "Loading sessions…",
+            theme::dim_style(),
+        )));
+    }
 
     let count = items.len();
     let is_focused = current_focus == focus;

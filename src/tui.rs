@@ -4063,6 +4063,7 @@ fn draw_help_popup(f: &mut ratatui::Frame, area: Rect) {
         ]),
         Line::from(""),
         Line::from(vec![Span::styled("  App", theme::title_style())]),
+        Line::from("    R / F5       refresh — rescan all session sources"),
         Line::from("    s            settings   |   F1  this help   |   q  quit"),
         Line::from(""),
         Line::from(vec![Span::styled(

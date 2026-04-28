@@ -2663,6 +2663,11 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
+        let liveness_cache = app
+            .liveness_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let generating_set = app
             .generating
             .lock()
@@ -2687,6 +2692,7 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
             &has_learnings_set,
             &obsidian_synced_set,
             &git_cache,
+            &liveness_cache,
             &generating_set,
             &app.filtered_active,
             &mut app.list_state_active,
@@ -2703,6 +2709,7 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
                 &has_learnings_set,
                 &obsidian_synced_set,
                 &git_cache,
+                &liveness_cache,
                 &generating_set,
                 &app.filtered_archived,
                 &mut app.list_state_archived,
@@ -3062,6 +3069,7 @@ fn draw_list(
     has_learnings: &std::collections::HashSet<String>,
     obsidian_synced: &std::collections::HashSet<String>,
     git_cache: &std::collections::HashMap<String, (crate::git_status::GitStatus, Instant)>,
+    liveness_cache: &std::collections::HashMap<String, CachedLiveness>,
     generating: &std::collections::HashSet<String>,
     indices: &[usize],
     list_state: &mut ListState,
@@ -3108,6 +3116,7 @@ fn draw_list(
                 pin_span,
                 Span::styled(format!("{} ", dt), theme::dim_style()),
                 Span::styled(format!("{} ", badge_text), Style::default().fg(badge_color)),
+                liveness_span(&s.session_id, liveness_cache),
                 kb_span,
                 obs_span,
                 git_span,
@@ -3144,7 +3153,7 @@ fn draw_list(
         .split(inner);
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            "  ★   date        src  ✓ ◆ ●  title                   msgs  folder",
+            "  ★   date        src  ▶ ✓ ◆ ●  title                   msgs  folder",
             theme::dim_style(),
         ))),
         inner_split[0],
@@ -3644,6 +3653,45 @@ fn draw_preview(f: &mut ratatui::Frame, app: &mut AppState, area: Rect, scroll: 
         .wrap(Wrap { trim: false })
         .scroll((effective_scroll, 0));
     f.render_widget(preview, area);
+}
+
+/// Render the single-column liveness glyph for a session.
+/// Returns a 2-column span: glyph + trailing space. Blank pair for `Idle`.
+/// Applies the idle-decay rule: a `Live` cached more than `LIVE_WINDOW_SECS`
+/// ago is displayed as `Recent` until the next poll overwrites the entry.
+fn liveness_span(
+    session_id: &str,
+    cache: &std::collections::HashMap<String, CachedLiveness>,
+) -> Span<'static> {
+    use std::time::{Duration, Instant};
+    let entry = cache.get(session_id);
+    let live_window = Duration::from_secs(liveness::LIVE_WINDOW_SECS);
+    let display_state = match entry {
+        None => Liveness::Idle,
+        Some(c) => {
+            // Idle-decay: a `Live` cached more than LIVE_WINDOW_SECS ago is
+            // displayed as Recent until the next poll overwrites.
+            if c.state == Liveness::Live
+                && Instant::now().saturating_duration_since(c.observed_at) > live_window
+            {
+                Liveness::Recent
+            } else {
+                c.state
+            }
+        }
+    };
+
+    match display_state {
+        Liveness::Live => Span::styled(
+            "▶ ",
+            Style::default().fg(ratatui::style::Color::Rgb(0xa6, 0xe3, 0xa1)),
+        ),
+        Liveness::Recent => Span::styled(
+            "◦ ",
+            Style::default().fg(ratatui::style::Color::Rgb(0x89, 0xdc, 0xeb)),
+        ),
+        Liveness::Idle => Span::raw("  "),
+    }
 }
 
 /// Render the single-column git status glyph for a project path.

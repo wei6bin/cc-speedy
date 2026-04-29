@@ -353,6 +353,159 @@ pub fn list_sessions() -> Result<Vec<Session>> {
     Ok(sessions)
 }
 
+/// Incremental variant of `list_sessions` for refresh. Same directory walk
+/// and same filter rules as `list_sessions`, but at both the index path and
+/// the fallback parse path it consults `prior_by_id` first — when the cheap
+/// mtime signal already matches, the prior `UnifiedSession` is cloned and
+/// pushed without parsing the jsonl.
+pub fn list_sessions_incremental(
+    prior_by_id: &crate::unified::PriorById<'_>,
+) -> Result<Vec<crate::unified::UnifiedSession>> {
+    let claude_dir = dirs::home_dir()
+        .ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?
+        .join(".claude")
+        .join("projects");
+
+    let mut sessions: Vec<crate::unified::UnifiedSession> = Vec::new();
+    let renames = read_rename_history();
+
+    let Ok(read_dir) = std::fs::read_dir(&claude_dir) else {
+        return Ok(sessions);
+    };
+
+    for proj_entry in read_dir.flatten() {
+        let proj_path = proj_entry.path();
+        if !proj_path.is_dir() {
+            continue;
+        }
+
+        let mut indexed_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        if let Some(index) = read_sessions_index(&proj_path) {
+            let project_path = index.original_path.clone();
+            let project_name = path_to_display_name(&project_path);
+
+            for entry in &index.entries {
+                indexed_ids.insert(entry.session_id.clone());
+
+                if entry.is_sidechain {
+                    continue;
+                }
+                if entry.message_count < 4 {
+                    continue;
+                }
+                if entry.first_prompt.contains("local-command-caveat") && entry.message_count < 10 {
+                    continue;
+                }
+
+                let modified = UNIX_EPOCH + Duration::from_millis(entry.file_mtime);
+
+                if let Some(reused) =
+                    crate::unified::try_reuse_prior(prior_by_id, &entry.session_id, modified)
+                {
+                    sessions.push(reused);
+                    continue;
+                }
+
+                let first_user_msg: String = entry.first_prompt.chars().take(80).collect();
+                let summary = renames
+                    .get(&entry.session_id)
+                    .cloned()
+                    .unwrap_or_else(|| entry.summary.clone());
+                sessions.push(crate::unified::UnifiedSession {
+                    session_id: entry.session_id.clone(),
+                    project_name: project_name.clone(),
+                    project_path: project_path.clone(),
+                    modified,
+                    message_count: entry.message_count,
+                    first_user_msg,
+                    summary,
+                    git_branch: entry.git_branch.clone(),
+                    source: crate::unified::SessionSource::ClaudeCode,
+                    jsonl_path: Some(entry.full_path.clone()),
+                    archived: false,
+                });
+            }
+        }
+
+        let Ok(dir_iter) = std::fs::read_dir(&proj_path) else {
+            continue;
+        };
+        for file_entry in dir_iter.flatten() {
+            let file_path = file_entry.path();
+            if file_path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+
+            let session_id_for_dedup = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            if indexed_ids.contains(session_id_for_dedup) {
+                continue;
+            }
+
+            let Ok(metadata) = file_path.metadata() else {
+                continue;
+            };
+            let Ok(modified) = metadata.modified() else {
+                continue;
+            };
+
+            // Cheap mtime check before the expensive parse_messages call.
+            if let Some(reused) =
+                crate::unified::try_reuse_prior(prior_by_id, session_id_for_dedup, modified)
+            {
+                sessions.push(reused);
+                continue;
+            }
+
+            let msgs = parse_messages(&file_path).unwrap_or_default();
+            if msgs.len() < 4 {
+                continue;
+            }
+
+            let first_user_text = msgs
+                .iter()
+                .find(|m| m.role == "user")
+                .map(|m| m.text.as_str())
+                .unwrap_or_default();
+
+            if first_user_text.contains("local-command-caveat") && msgs.len() < 10 {
+                continue;
+            }
+
+            let first_user_msg: String = first_user_text.chars().take(80).collect();
+            let session_id = session_id_for_dedup.to_string();
+
+            let dir_name = proj_path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            let project_path_str =
+                read_cwd_from_jsonl(&file_path).unwrap_or_else(|| dir_name_to_abs_path(&dir_name));
+            let project_name = path_to_display_name(&project_path_str);
+
+            let jsonl_title = parse_session_title(&file_path).unwrap_or_default();
+            let summary = renames.get(&session_id).cloned().unwrap_or(jsonl_title);
+
+            sessions.push(crate::unified::UnifiedSession {
+                session_id,
+                project_name,
+                project_path: project_path_str,
+                modified,
+                message_count: msgs.len(),
+                first_user_msg,
+                summary,
+                git_branch: String::new(),
+                source: crate::unified::SessionSource::ClaudeCode,
+                jsonl_path: Some(file_path.to_string_lossy().to_string()),
+                archived: false,
+            });
+        }
+    }
+
+    sessions.sort_by(|a, b| b.modified.cmp(&a.modified));
+    Ok(sessions)
+}
+
 /// Convert Claude Code project dir name (e.g. "-home-weibin-repo-ai-foo") to an absolute path.
 /// NOTE: This translation is ambiguous — a `-` in the dir name could be either a path separator
 /// or an original hyphen in a directory name. For projects with hyphens in path components,

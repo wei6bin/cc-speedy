@@ -148,6 +148,74 @@ pub fn list_copilot_sessions_from_dir(base: &Path) -> Result<Vec<UnifiedSession>
     Ok(sessions)
 }
 
+/// Incremental variant of `list_copilot_sessions` for refresh. Per-session
+/// the workspace.yaml is still parsed (it's tiny and gives us the id and
+/// updated_at), but the events.jsonl read — which is the expensive step,
+/// done inside `count_messages_and_first` — is skipped when `prior_by_id`
+/// already has the session at a matching `updated_at`.
+pub fn list_copilot_sessions_incremental(
+    prior_by_id: &crate::unified::PriorById<'_>,
+) -> Result<Vec<UnifiedSession>> {
+    let base = match copilot_sessions_dir() {
+        Some(p) if p.exists() => p,
+        _ => return Ok(vec![]),
+    };
+    list_copilot_sessions_from_dir_incremental(&base, prior_by_id)
+}
+
+pub fn list_copilot_sessions_from_dir_incremental(
+    base: &Path,
+    prior_by_id: &crate::unified::PriorById<'_>,
+) -> Result<Vec<UnifiedSession>> {
+    let entries = match std::fs::read_dir(base) {
+        Ok(e) => e,
+        Err(_) => return Ok(vec![]),
+    };
+    let mut sessions = Vec::new();
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let ws = match parse_workspace_yaml(&path.join("workspace.yaml")) {
+            Some(ws) => ws,
+            None => continue,
+        };
+        let modified = ws
+            .updated_at
+            .as_deref()
+            .and_then(parse_iso8601)
+            .unwrap_or(UNIX_EPOCH);
+
+        // Cheap mtime check before reading events.jsonl.
+        if let Some(reused) = crate::unified::try_reuse_prior(prior_by_id, &ws.id, modified) {
+            sessions.push(reused);
+            continue;
+        }
+
+        let (message_count, first_user_msg) = count_messages_and_first(&path.join("events.jsonl"));
+        if message_count < 4 {
+            continue;
+        }
+        let title = ws.name.or(ws.summary).unwrap_or_default();
+        let project_name = crate::util::path_last_n(&ws.cwd, 2);
+        sessions.push(UnifiedSession {
+            session_id: ws.id,
+            project_name,
+            project_path: ws.cwd,
+            modified,
+            message_count,
+            first_user_msg,
+            summary: title,
+            git_branch: ws.branch.unwrap_or_default(),
+            source: SessionSource::Copilot,
+            jsonl_path: Some(path.join("events.jsonl").to_string_lossy().into_owned()),
+            archived: false,
+        });
+    }
+    Ok(sessions)
+}
+
 pub fn parse_copilot_messages(session_id: &str) -> Result<Vec<Message>> {
     let path = match copilot_sessions_dir() {
         Some(d) => d.join(session_id).join("events.jsonl"),

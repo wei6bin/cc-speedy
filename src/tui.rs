@@ -231,6 +231,8 @@ struct AppState {
     visible_tx: mpsc::UnboundedSender<Vec<VisibleSnapshot>>,
     /// Cached visibility set used to detect changes and avoid re-sending.
     last_visible_ids: std::collections::HashSet<String>,
+    /// `Some(handle)` while the local web server is running. Toggle via `W`.
+    web_handle: Option<crate::web::WebServerHandle>,
 }
 
 /// RAII guard that clears the `refreshing` atomic flag when dropped, so a
@@ -344,6 +346,7 @@ impl AppState {
             liveness_rx,
             visible_tx,
             last_visible_ids: std::collections::HashSet::new(),
+            web_handle: None,
         };
         // Split archived out of the active list on startup so the "all" view
         // correctly shows archived sessions in the bottom-left panel.
@@ -351,6 +354,19 @@ impl AppState {
         state.rebuild_projects();
         spawn_liveness_polling_task(liveness_tx, visible_rx);
         Ok(state)
+    }
+
+    /// Build a `WebState` snapshot for the local web server. Sessions are
+    /// captured at the moment `W` is pressed; the liveness cache is shared
+    /// live (Arc clone). To pick up new sessions added by a refresh, the
+    /// user toggles `W` off and on.
+    fn web_state(&self) -> crate::web::WebState {
+        let sessions = std::sync::Arc::new(std::sync::Mutex::new(self.sessions.clone()));
+        crate::web::WebState {
+            sessions,
+            liveness_cache: self.liveness_cache.clone(),
+            tailer_registry: crate::web::tailer::TailerRegistry::default(),
+        }
     }
 
     /// Rebuild per-session haystacks for grep mode. Each haystack is lowercased
@@ -1840,6 +1856,76 @@ async fn run_event_loop(
                         app.insights_visible = !app.insights_visible;
                     }
 
+                    // W: toggle the local web companion server.
+                    // `_` modifier so Shift+W (which produces 'W') matches
+                    // regardless of whether the terminal reports SHIFT or NONE.
+                    (AppMode::Normal, _, KeyCode::Char('W')) => match app.web_handle.take() {
+                        Some(handle) => {
+                            handle.shutdown();
+                            app.status_msg = Some(("web stopped".to_string(), Instant::now()));
+                        }
+                        None => {
+                            let state = app.web_state();
+                            match crate::web::start(state).await {
+                                Ok(handle) => {
+                                    let msg = format!("web: http://{}", handle.addr);
+                                    app.web_handle = Some(handle);
+                                    app.status_msg = Some((msg, Instant::now()));
+                                }
+                                Err(e) => {
+                                    app.status_msg =
+                                        Some((format!("web start failed: {e}"), Instant::now()));
+                                }
+                            }
+                        }
+                    },
+
+                    // Ctrl+B: open the running web URL in the default browser
+                    // (`o` is taken by Obsidian save in Normal mode, so use Ctrl+B for "browser").
+                    (AppMode::Normal, KeyModifiers::CONTROL, KeyCode::Char('b')) => {
+                        if let Some(ref h) = app.web_handle {
+                            let url = format!("http://{}", h.addr);
+                            let result = if cfg!(target_os = "macos") {
+                                std::process::Command::new("open").arg(&url).spawn()
+                            } else if cfg!(target_os = "windows") {
+                                std::process::Command::new("cmd")
+                                    .args(["/C", "start", &url])
+                                    .spawn()
+                            } else {
+                                std::process::Command::new("xdg-open").arg(&url).spawn()
+                            };
+                            app.status_msg = Some(match result {
+                                Ok(_) => ("opened in browser".to_string(), Instant::now()),
+                                Err(e) => (format!("open failed: {e}"), Instant::now()),
+                            });
+                        } else {
+                            app.status_msg = Some((
+                                "web not running (press W to start)".to_string(),
+                                Instant::now(),
+                            ));
+                        }
+                    }
+
+                    // y: yank the running web URL to the clipboard
+                    (AppMode::Normal, KeyModifiers::NONE, KeyCode::Char('y')) => {
+                        if let Some(ref h) = app.web_handle {
+                            let url = format!("http://{}", h.addr);
+                            let msg = match arboard::Clipboard::new() {
+                                Ok(mut cb) => match cb.set_text(url.clone()) {
+                                    Ok(_) => "URL copied".to_string(),
+                                    Err(e) => format!("clipboard error: {e}"),
+                                },
+                                Err(e) => format!("clipboard unavailable: {e}"),
+                            };
+                            app.status_msg = Some((msg, Instant::now()));
+                        } else {
+                            app.status_msg = Some((
+                                "web not running (press W to start)".to_string(),
+                                Instant::now(),
+                            ));
+                        }
+                    }
+
                     // ] / [ / { / } — glyph timeline navigation in the Insights panel.
                     // No-op when insights aren't loaded for this session yet.
                     (AppMode::Normal, KeyModifiers::NONE, KeyCode::Char(']'))
@@ -2789,21 +2875,32 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
                 Some(crate::unified::SessionSource::OpenCode) => "OC",
                 Some(crate::unified::SessionSource::Copilot) => "CO",
             };
+            let web_suffix = match &app.web_handle {
+                Some(h) => format!("  · web: http://{}", h.addr),
+                None => String::new(),
+            };
             let hint = if let Some(ref pp) = app.project_filter {
                 if app.filter.is_empty() {
                     format!(
-                        "{}  project: {}  [src: {}]  (← projects · / search)",
+                        "{}  project: {}  [src: {}]  (← projects · / search){}",
                         prefix,
                         crate::util::path_last_n(pp, 2),
-                        src_tag
+                        src_tag,
+                        web_suffix
                     )
                 } else {
-                    format!("{}  filter: {}  (Esc clear)", prefix, app.filter)
+                    format!(
+                        "{}  filter: {}  (Esc clear){}",
+                        prefix, app.filter, web_suffix
+                    )
                 }
             } else if app.filter.is_empty() {
-                format!("{}  (F1: help  /: filter  ?: grep  L: library)", prefix)
+                format!(
+                    "{}  (F1: help  /: filter  ?: grep  L: library){}",
+                    prefix, web_suffix
+                )
             } else {
-                format!("{}  filter: {}", prefix, app.filter)
+                format!("{}  filter: {}{}", prefix, app.filter, web_suffix)
             };
             (hint, " cc-speedy ")
         }
@@ -4352,6 +4449,8 @@ fn draw_help_popup(f: &mut ratatui::Frame, area: Rect) {
         Line::from(""),
         Line::from(vec![Span::styled("  App", theme::title_style())]),
         Line::from("    R / F5       refresh — rescan all session sources"),
+        Line::from("    W            toggle local web server (browser companion)"),
+        Line::from("    Ctrl+B       open web URL in default browser   |   y  yank URL"),
         Line::from("    s            settings   |   F1  this help   |   q  quit"),
         Line::from(""),
         Line::from(vec![Span::styled(

@@ -22,7 +22,8 @@ use std::path::Path;
 use std::time::SystemTime;
 
 /// Tri-state liveness signal for a session.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Liveness {
     Idle,
     Recent,

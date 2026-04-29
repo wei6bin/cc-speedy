@@ -4272,6 +4272,8 @@ fn draw_help_popup(f: &mut ratatui::Frame, area: Rect) {
         ]),
         Line::from(""),
         Line::from(vec![Span::styled("  App", theme::title_style())]),
+        Line::from("    W            toggle local web server (browser companion)"),
+        Line::from("    Ctrl+B       open web URL in default browser   |   y  yank URL"),
         Line::from("    s            settings   |   F1  this help   |   q  quit"),
         Line::from(""),
         Line::from(vec![Span::styled(

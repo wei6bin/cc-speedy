@@ -5,6 +5,7 @@ pub mod digest;
 pub mod git_status;
 pub mod insights;
 pub mod install;
+pub mod liveness;
 pub mod obsidian;
 pub mod obsidian_cli;
 pub mod opencode_sessions;

@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>cc-speedy — session</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <a href="/">← back to dashboard</a>
+  <h1 id="session-title">Loading…
+    <span id="live-badge" class="live-badge disconnected">○ idle</span>
+  </h1>
+  <div id="session-meta"></div>
+  <div id="turns">Loading turns…</div>
+  <script src="/static/app.js"></script>
+  <script>window.ccSpeedy && window.ccSpeedy.initSession && window.ccSpeedy.initSession();</script>
+</body>
+</html>

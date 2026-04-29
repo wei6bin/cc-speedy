@@ -113,6 +113,28 @@ pub async fn api_turn(
     Ok(Json(detail))
 }
 
+/// `GET /session/{id}` — HTML shell for the session detail page.
+/// Returns 404 if `session_id` is not in the in-memory session list.
+pub async fn session_page(
+    State(state): State<super::WebState>,
+    Path(session_id): Path<String>,
+) -> Result<axum::response::Response, StatusCode> {
+    let sessions = state
+        .sessions
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    if !sessions.iter().any(|s| s.session_id == session_id) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    Ok((
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        super::assets::SESSION_HTML,
+    )
+        .into_response())
+}
+
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures::stream::Stream;
 use std::convert::Infallible;

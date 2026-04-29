@@ -4,3 +4,4 @@
 pub const APP_CSS: &str = include_str!("static/app.css");
 pub const APP_JS: &str = include_str!("static/app.js");
 pub const DASHBOARD_HTML: &str = include_str!("static/dashboard.html");
+pub const SESSION_HTML: &str = include_str!("static/session.html");

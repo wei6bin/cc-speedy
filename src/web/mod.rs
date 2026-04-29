@@ -79,6 +79,7 @@ fn build_router(state: WebState) -> Router {
         .route("/health", get(handlers::health))
         .route("/api/sessions", get(handlers::api_sessions))
         .route("/api/session/{id}/turns/{idx}", get(handlers::api_turn))
+        .route("/session/{id}", get(handlers::session_page))
         .route("/session/{id}/stream", get(handlers::sse_stream))
         .route("/static/app.css", get(handlers::static_app_css))
         .route("/static/app.js", get(handlers::static_app_js))
@@ -221,6 +222,46 @@ mod tests {
         );
         let resp = reqwest::get(&url).await.unwrap();
         assert!(resp.status().is_client_error());
+        handle.shutdown();
+    }
+
+    #[tokio::test]
+    async fn session_page_renders_for_known_id() {
+        use crate::unified::{SessionSource, UnifiedSession};
+        use std::time::SystemTime;
+        let sessions = vec![UnifiedSession {
+            session_id: "abc".to_string(),
+            project_name: "p".to_string(),
+            project_path: "/tmp".to_string(),
+            modified: SystemTime::now(),
+            message_count: 0,
+            first_user_msg: String::new(),
+            summary: String::new(),
+            git_branch: String::new(),
+            source: SessionSource::ClaudeCode,
+            jsonl_path: None,
+            archived: false,
+        }];
+        let state = WebState {
+            sessions: Arc::new(std::sync::Mutex::new(sessions)),
+            liveness_cache: Arc::new(std::sync::Mutex::new(Default::default())),
+            tailer_registry: tailer::TailerRegistry::default(),
+        };
+        let handle = start(state).await.unwrap();
+        let url = format!("http://{}/session/abc", handle.addr);
+        let resp = reqwest::get(&url).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let body = resp.text().await.unwrap();
+        assert!(body.contains("Loading"));
+        handle.shutdown();
+    }
+
+    #[tokio::test]
+    async fn session_page_404_unknown_id() {
+        let handle = start(empty_state()).await.unwrap();
+        let url = format!("http://{}/session/nope", handle.addr);
+        let resp = reqwest::get(&url).await.unwrap();
+        assert_eq!(resp.status(), 404);
         handle.shutdown();
     }
 

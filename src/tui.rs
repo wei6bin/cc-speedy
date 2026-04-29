@@ -1712,31 +1712,29 @@ async fn run_event_loop(
                         app.insights_visible = !app.insights_visible;
                     }
 
-                    // W: toggle the local web companion server
-                    (AppMode::Normal, KeyModifiers::NONE, KeyCode::Char('W')) => {
-                        match app.web_handle.take() {
-                            Some(handle) => {
-                                handle.shutdown();
-                                app.status_msg = Some(("web stopped".to_string(), Instant::now()));
-                            }
-                            None => {
-                                let state = app.web_state();
-                                match crate::web::start(state).await {
-                                    Ok(handle) => {
-                                        let msg = format!("web: http://{}", handle.addr);
-                                        app.web_handle = Some(handle);
-                                        app.status_msg = Some((msg, Instant::now()));
-                                    }
-                                    Err(e) => {
-                                        app.status_msg = Some((
-                                            format!("web start failed: {e}"),
-                                            Instant::now(),
-                                        ));
-                                    }
+                    // W: toggle the local web companion server.
+                    // `_` modifier so Shift+W (which produces 'W') matches
+                    // regardless of whether the terminal reports SHIFT or NONE.
+                    (AppMode::Normal, _, KeyCode::Char('W')) => match app.web_handle.take() {
+                        Some(handle) => {
+                            handle.shutdown();
+                            app.status_msg = Some(("web stopped".to_string(), Instant::now()));
+                        }
+                        None => {
+                            let state = app.web_state();
+                            match crate::web::start(state).await {
+                                Ok(handle) => {
+                                    let msg = format!("web: http://{}", handle.addr);
+                                    app.web_handle = Some(handle);
+                                    app.status_msg = Some((msg, Instant::now()));
+                                }
+                                Err(e) => {
+                                    app.status_msg =
+                                        Some((format!("web start failed: {e}"), Instant::now()));
                                 }
                             }
                         }
-                    }
+                    },
 
                     // Ctrl+B: open the running web URL in the default browser
                     // (`o` is taken by Obsidian save in Normal mode, so use Ctrl+B for "browser").

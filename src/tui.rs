@@ -685,8 +685,16 @@ impl AppState {
             // refreshes until the TUI is restarted.
             let _guard = RefreshInflightGuard { flag };
 
+            // The incremental lister consults `prior` and skips per-session
+            // parses for unchanged sessions; on a 400+ session corpus this
+            // turns refresh into a stat-only walk in the common case.
+            let prior_for_scan = prior.clone();
             let outcome: Result<Vec<UnifiedSession>, String> =
-                match tokio::task::spawn_blocking(crate::unified::list_all_sessions).await {
+                match tokio::task::spawn_blocking(move || {
+                    crate::unified::list_all_sessions_incremental(&prior_for_scan)
+                })
+                .await
+                {
                     Ok(Ok(sessions)) => Ok(sessions),
                     Ok(Err(e)) => Err(format!("scan failed: {e}")),
                     Err(e) => Err(format!("scan task panicked: {e}")),

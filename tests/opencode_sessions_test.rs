@@ -154,3 +154,52 @@ fn test_parse_opencode_messages_skips_non_text_parts() {
     // Still only 2 text messages; tool-use part skipped
     assert_eq!(messages.len(), 2);
 }
+
+#[test]
+fn test_incremental_empty_prior_matches_non_incremental() {
+    use cc_speedy::opencode_sessions::query_sessions_from_conn_incremental;
+    use cc_speedy::unified::PriorById;
+    use std::collections::HashMap;
+    let conn = setup_fixture_db();
+    let baseline = query_sessions_from_conn(&conn).unwrap();
+    let map: PriorById = HashMap::new();
+    let incr = query_sessions_from_conn_incremental(&conn, &map).unwrap();
+    assert_eq!(incr.len(), baseline.len());
+    assert_eq!(incr[0].session_id, baseline[0].session_id);
+    assert_eq!(incr[0].first_user_msg, baseline[0].first_user_msg);
+}
+
+#[test]
+fn test_incremental_reuses_prior_when_mtime_matches() {
+    // The decisive evidence: the prior carries a marker first_user_msg that
+    // does NOT match what query_first_user_text would return. If the
+    // incremental path reused prior, the marker is preserved; if it re-
+    // queried, the marker would be replaced with "help me write tests".
+    use cc_speedy::opencode_sessions::query_sessions_from_conn_incremental;
+    use cc_speedy::unified::{PriorById, SessionSource, UnifiedSession};
+    use std::time::{Duration, UNIX_EPOCH};
+    let conn = setup_fixture_db();
+    let baseline = query_sessions_from_conn(&conn).unwrap();
+    assert_eq!(baseline.len(), 1);
+
+    let prior = vec![UnifiedSession {
+        session_id: "ses_aaa".to_string(),
+        project_name: "ai/myproj".to_string(),
+        project_path: "/home/user/ai/myproj".to_string(),
+        modified: UNIX_EPOCH + Duration::from_millis(1741600000000),
+        message_count: 2,
+        first_user_msg: "MARKER_FROM_PRIOR".to_string(),
+        summary: "my title".to_string(),
+        git_branch: String::new(),
+        source: SessionSource::OpenCode,
+        jsonl_path: None,
+        archived: false,
+    }];
+    let map: PriorById = prior.iter().map(|s| (s.session_id.as_str(), s)).collect();
+    let incr = query_sessions_from_conn_incremental(&conn, &map).unwrap();
+    assert_eq!(incr.len(), 1);
+    assert_eq!(
+        incr[0].first_user_msg, "MARKER_FROM_PRIOR",
+        "incremental path should have reused the prior session and skipped query_first_user_text"
+    );
+}

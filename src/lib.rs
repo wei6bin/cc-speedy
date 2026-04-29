@@ -8,6 +8,7 @@ pub mod install;
 pub mod obsidian;
 pub mod obsidian_cli;
 pub mod opencode_sessions;
+pub mod refresh;
 pub mod sessions;
 pub mod settings;
 pub mod store;

@@ -1,5 +1,6 @@
+use crate::refresh::{self, RefreshResult};
 use crate::theme;
-use crate::unified::{list_all_sessions, SessionSource, UnifiedSession};
+use crate::unified::{SessionSource, UnifiedSession};
 use anyhow::Result;
 use crossterm::{
     event::{self, Event, KeyCode, KeyModifiers},
@@ -15,8 +16,10 @@ use ratatui::{
     Terminal,
 };
 use std::io::stdout;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use tokio::sync::mpsc;
 
 #[derive(PartialEq, Copy, Clone)]
 enum Focus {
@@ -160,6 +163,34 @@ struct AppState {
     /// Index of the focused block in `turn_detail.blocks`. 0 by default; reset
     /// on every turn navigation.
     turn_detail_focused: usize,
+    /// Global in-flight guard for the session re-scan triggered by `R` / `F5`.
+    /// Lighter than the per-session HashSet pattern (`generating`,
+    /// `insights_loading`) because refresh is one global action.
+    refreshing: Arc<AtomicBool>,
+    /// Channel for receiving completed re-scan results from the background task.
+    refresh_tx: mpsc::UnboundedSender<Result<RefreshResult, String>>,
+    refresh_rx: mpsc::UnboundedReceiver<Result<RefreshResult, String>>,
+    /// `true` once the first refresh attempt has completed, regardless of
+    /// success or failure. Gates the "Loading sessions…" placeholder so it
+    /// disappears even when the initial scan errors out.
+    did_initial_load: bool,
+    /// `true` once the git-status batch has been kicked off after a successful
+    /// initial scan. Decoupled from `did_initial_load` so a transient first-
+    /// scan error doesn't permanently disarm the git batch.
+    did_initial_git_batch: bool,
+}
+
+/// RAII guard that clears the `refreshing` atomic flag when dropped, so a
+/// panic inside the spawned scan task can't leave the flag stuck-set and
+/// permanently block future refreshes.
+struct RefreshInflightGuard {
+    flag: Arc<AtomicBool>,
+}
+
+impl Drop for RefreshInflightGuard {
+    fn drop(&mut self) {
+        self.flag.store(false, Ordering::SeqCst);
+    }
 }
 
 impl AppState {
@@ -188,6 +219,7 @@ impl AppState {
         let parent_of = crate::store::load_all_links(&conn).unwrap_or_default();
         let insights_cache = crate::store::load_all_insights(&conn).unwrap_or_default();
         let settings = crate::settings::load(&conn);
+        let (refresh_tx, refresh_rx) = mpsc::unbounded_channel::<Result<RefreshResult, String>>();
         let mut state = Self {
             filtered_active: (0..n).collect(),
             filtered_archived: vec![],
@@ -245,6 +277,11 @@ impl AppState {
             turn_detail_scroll: 0,
             turn_detail_expanded: std::collections::HashSet::new(),
             turn_detail_focused: 0,
+            refreshing: Arc::new(AtomicBool::new(false)),
+            refresh_tx,
+            refresh_rx,
+            did_initial_load: false,
+            did_initial_git_batch: false,
         };
         // Split archived out of the active list on startup so the "all" view
         // correctly shows archived sessions in the bottom-left panel.
@@ -548,6 +585,107 @@ impl AppState {
                 let idx = self.list_state_active.selected()?;
                 let raw = *self.filtered_active.get(idx)?;
                 self.sessions.get(raw)
+            }
+        }
+    }
+
+    /// Trigger a non-blocking re-scan of all session sources. If a refresh is
+    /// already in flight, this call is a no-op (the user pressing `R` while a
+    /// scan is running shouldn't stack up scans).
+    pub fn refresh_sessions(&self) {
+        if self.refreshing.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let prior: Vec<UnifiedSession> = self.sessions.clone();
+        let tx = self.refresh_tx.clone();
+        let flag = self.refreshing.clone();
+
+        tokio::spawn(async move {
+            // Guard ensures the in-flight flag is cleared even if anything
+            // below panics — otherwise a stuck flag would block all future
+            // refreshes until the TUI is restarted.
+            let _guard = RefreshInflightGuard { flag };
+
+            let outcome: Result<Vec<UnifiedSession>, String> =
+                match tokio::task::spawn_blocking(crate::unified::list_all_sessions).await {
+                    Ok(Ok(sessions)) => Ok(sessions),
+                    Ok(Err(e)) => Err(format!("scan failed: {e}")),
+                    Err(e) => Err(format!("scan task panicked: {e}")),
+                };
+
+            let payload = outcome.map(|new| refresh::compute_refresh_diff(&prior, new));
+            // Only fails if the receiver was dropped (app shutting down).
+            let _ = tx.send(payload);
+        });
+    }
+
+    /// Pull any pending refresh results out of the channel, replace the
+    /// in-memory session list, re-apply filters, restore selection by
+    /// `session_id`, and emit a status-line toast. Called once per event-loop
+    /// iteration before drawing.
+    pub fn drain_refresh_results(&mut self) {
+        // Capture selection IDs from BOTH lists so the user's selection is
+        // preserved regardless of which panel currently has focus.
+        let prior_active_id: Option<String> = self
+            .list_state_active
+            .selected()
+            .and_then(|i| self.filtered_active.get(i).copied())
+            .and_then(|raw| self.sessions.get(raw))
+            .map(|s| s.session_id.clone());
+        let prior_archived_id: Option<String> = self
+            .list_state_archived
+            .selected()
+            .and_then(|i| self.filtered_archived.get(i).copied())
+            .and_then(|raw| self.sessions.get(raw))
+            .map(|s| s.session_id.clone());
+
+        let mut latest: Option<Result<RefreshResult, String>> = None;
+        while let Ok(r) = self.refresh_rx.try_recv() {
+            latest = Some(r);
+        }
+        let Some(outcome) = latest else { return };
+
+        match outcome {
+            Ok(r) => {
+                let total = r.sessions.len();
+                self.sessions = r.sessions;
+                self.apply_filter();
+
+                let new_active = refresh::select_index_for_session_id(
+                    &self.filtered_active,
+                    &self.sessions,
+                    prior_active_id.as_deref(),
+                );
+                self.list_state_active.select(new_active);
+                let new_archived = refresh::select_index_for_session_id(
+                    &self.filtered_archived,
+                    &self.sessions,
+                    prior_archived_id.as_deref(),
+                );
+                self.list_state_archived.select(new_archived);
+
+                let toast_text = if r.new_count == 0 && r.updated_count == 0 {
+                    format!("Refreshed: {total} sessions (no changes)")
+                } else {
+                    format!(
+                        "Refreshed: {total} sessions (+{} new, {} updated)",
+                        r.new_count, r.updated_count
+                    )
+                };
+                self.status_msg = Some((toast_text, Instant::now()));
+
+                self.did_initial_load = true;
+                if !self.did_initial_git_batch {
+                    self.did_initial_git_batch = true;
+                    spawn_git_status_batch(self);
+                }
+            }
+            Err(msg) => {
+                self.status_msg = Some((format!("Refresh failed: {msg}"), Instant::now()));
+                // Hide the "Loading sessions…" placeholder so the user isn't
+                // misled into thinking work is still in progress. The git
+                // batch stays armed until the next successful scan.
+                self.did_initial_load = true;
             }
         }
     }
@@ -863,8 +1001,6 @@ fn maybe_spawn_insights_load(app: &AppState) {
 }
 
 pub async fn run() -> Result<()> {
-    let sessions = list_all_sessions()?;
-
     let conn = crate::store::open_db()?;
     crate::store::migrate_from_files(&conn)?;
 
@@ -874,17 +1010,14 @@ pub async fn run() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = AppState::new(sessions, conn)?;
+    // Boot with an empty list; the first event-loop tick fires a refresh that
+    // populates it. Keeps "load sessions" on a single async path and matches
+    // the TUI invariant that I/O never blocks the UI.
+    let mut app = AppState::new(Vec::new(), conn)?;
+    app.refresh_sessions();
 
-    // Kick off git status checks for each unique project path in parallel.
-    // Cache is shared; results land while the TUI renders. First frame may
-    // show blank indicators; subsequent redraws pick up completed entries.
-    spawn_git_status_batch(&app);
-
-    // Run event loop, always clean up terminal regardless of result
     let result = run_event_loop(&mut terminal, &mut app).await;
 
-    // Always clean up terminal
     let _ = disable_raw_mode();
     let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
     let _ = terminal.show_cursor();
@@ -897,6 +1030,7 @@ async fn run_event_loop(
     app: &mut AppState,
 ) -> Result<()> {
     loop {
+        app.drain_refresh_results();
         maybe_refresh_selected_git(app);
         terminal.draw(|f| draw(f, app))?;
 
@@ -1474,6 +1608,17 @@ async fn run_event_loop(
                     (AppMode::Normal, KeyModifiers::NONE, KeyCode::Char('g')) => {
                         spawn_git_status_batch(app);
                         app.status_msg = Some(("refreshing git…".to_string(), Instant::now()));
+                    }
+
+                    // R / F5: re-scan all session sources without restarting the TUI.
+                    // Active in Normal, Library, and Projects modes.
+                    (AppMode::Normal, KeyModifiers::NONE, KeyCode::Char('R'))
+                    | (AppMode::Library, KeyModifiers::NONE, KeyCode::Char('R'))
+                    | (AppMode::Projects, KeyModifiers::NONE, KeyCode::Char('R'))
+                    | (AppMode::Normal, KeyModifiers::NONE, KeyCode::F(5))
+                    | (AppMode::Library, KeyModifiers::NONE, KeyCode::F(5))
+                    | (AppMode::Projects, KeyModifiers::NONE, KeyCode::F(5)) => {
+                        app.refresh_sessions();
                     }
 
                     // i: toggle the Insights panel above the Summary
@@ -2340,6 +2485,11 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
         AppMode::ActionMenu => ("".to_string(), " cc-speedy "),
         AppMode::Settings => ("".to_string(), " cc-speedy — Settings "),
         AppMode::Library => {
+            let prefix = if app.refreshing.load(Ordering::SeqCst) {
+                "↻ "
+            } else {
+                ""
+            };
             let cat_label = match app.library_category.as_deref() {
                 Some("decision_points") => "decisions",
                 Some("lessons_gotchas") => "lessons",
@@ -2348,8 +2498,8 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
             };
             let n = app.library_filtered.len();
             (
-                format!("  [{}]  {} entr{}  (/: filter  0:all  1:dec  2:lsn  3:tol  Enter: jump  Esc: exit)",
-                        cat_label, n, if n == 1 { "y" } else { "ies" }),
+                format!("{}  [{}]  {} entr{}  (/: filter  0:all  1:dec  2:lsn  3:tol  Enter: jump  Esc: exit)",
+                        prefix, cat_label, n, if n == 1 { "y" } else { "ies" }),
                 " Learning Library ",
             )
         }
@@ -2358,6 +2508,11 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
             " Library — Filter  [Esc: clear  Enter: apply] ",
         ),
         AppMode::Projects => {
+            let prefix = if app.refreshing.load(Ordering::SeqCst) {
+                "↻ "
+            } else {
+                ""
+            };
             let sort_label = match app.projects_sort {
                 ProjectSort::LastActive => "last active",
                 ProjectSort::SessionCount => "session count",
@@ -2372,7 +2527,8 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
             let n = app.projects_filtered.len();
             (
                 format!(
-                    "  sort: {}  ·  src: {}  ·  {} project{}  (/: search  s: sort  →: enter  q: quit)",
+                    "{}  sort: {}  ·  src: {}  ·  {} project{}  (/: search  s: sort  →: enter  q: quit)",
+                    prefix,
                     sort_label,
                     src_tag,
                     n,
@@ -2408,6 +2564,11 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
         AppMode::Help => ("".to_string(), " cc-speedy — Help "),
         AppMode::TurnDetail => ("".to_string(), " cc-speedy "),
         AppMode::Normal => {
+            let prefix = if app.refreshing.load(Ordering::SeqCst) {
+                "↻ "
+            } else {
+                ""
+            };
             let src_tag = match &app.source_filter {
                 None => "all",
                 Some(crate::unified::SessionSource::ClaudeCode) => "CC",
@@ -2417,17 +2578,18 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
             let hint = if let Some(ref pp) = app.project_filter {
                 if app.filter.is_empty() {
                     format!(
-                        "  project: {}  [src: {}]  (← projects · / search)",
+                        "{}  project: {}  [src: {}]  (← projects · / search)",
+                        prefix,
                         crate::util::path_last_n(pp, 2),
                         src_tag
                     )
                 } else {
-                    format!("  filter: {}  (Esc clear)", app.filter)
+                    format!("{}  filter: {}  (Esc clear)", prefix, app.filter)
                 }
             } else if app.filter.is_empty() {
-                "  (F1: help  /: filter  ?: grep  L: library)".to_string()
+                format!("{}  (F1: help  /: filter  ?: grep  L: library)", prefix)
             } else {
-                format!("  filter: {}", app.filter)
+                format!("{}  filter: {}", prefix, app.filter)
             };
             (hint, " cc-speedy ")
         }
@@ -2495,6 +2657,7 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
 
+        let show_loading = app.sessions.is_empty() && !app.did_initial_load;
         draw_list(
             f,
             list_panes[0],
@@ -2509,6 +2672,7 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
             "Sessions",
             Focus::ActiveList,
             app.focus,
+            show_loading,
         );
         if archived_count > 0 {
             draw_list(
@@ -2525,6 +2689,7 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
                 "Archived",
                 Focus::ArchivedList,
                 app.focus,
+                false,
             );
         }
 
@@ -2884,9 +3049,10 @@ fn draw_list(
     title: &str,
     focus: Focus,
     current_focus: Focus,
+    show_loading_placeholder: bool,
 ) {
     let spinner = spinner_glyph();
-    let items: Vec<ListItem> = indices
+    let mut items: Vec<ListItem> = indices
         .iter()
         .map(|&i| {
             let s = &sessions[i];
@@ -2934,6 +3100,13 @@ fn draw_list(
             ListItem::new(line)
         })
         .collect();
+
+    if items.is_empty() && show_loading_placeholder {
+        items.push(ListItem::new(Span::styled(
+            "Loading sessions…",
+            theme::dim_style(),
+        )));
+    }
 
     let count = items.len();
     let is_focused = current_focus == focus;
@@ -3900,6 +4073,7 @@ fn draw_help_popup(f: &mut ratatui::Frame, area: Rect) {
         ]),
         Line::from(""),
         Line::from(vec![Span::styled("  App", theme::title_style())]),
+        Line::from("    R / F5       refresh — rescan all session sources"),
         Line::from("    s            settings   |   F1  this help   |   q  quit"),
         Line::from(""),
         Line::from(vec![Span::styled(

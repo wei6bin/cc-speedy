@@ -1,6 +1,9 @@
 use cc_speedy::copilot_sessions::{
-    list_copilot_sessions_from_dir, parse_copilot_messages_from_path,
+    list_copilot_sessions_from_dir, list_copilot_sessions_from_dir_incremental,
+    parse_copilot_messages_from_path,
 };
+use cc_speedy::unified::{PriorById, UnifiedSession};
+use std::collections::HashMap;
 use std::fs;
 use tempfile::TempDir;
 
@@ -184,4 +187,93 @@ fn test_parse_messages_skips_non_message_events() {
     let msgs = parse_copilot_messages_from_path(&path).unwrap();
     assert_eq!(msgs.len(), 1);
     assert_eq!(msgs[0].text, "only msg");
+}
+
+#[test]
+fn test_incremental_empty_prior_matches_non_incremental() {
+    let tmp = TempDir::new().unwrap();
+    make_session(
+        &tmp,
+        "sess-a",
+        "id: sess-a\ncwd: /home/user/proj\nupdated_at: 2026-01-01T00:00:00Z\n",
+        FOUR_MSGS,
+    );
+    let baseline = list_copilot_sessions_from_dir(tmp.path()).unwrap();
+    let map: PriorById = HashMap::new();
+    let incr = list_copilot_sessions_from_dir_incremental(tmp.path(), &map).unwrap();
+    assert_eq!(incr.len(), baseline.len());
+    assert_eq!(incr[0].session_id, baseline[0].session_id);
+    assert_eq!(incr[0].first_user_msg, baseline[0].first_user_msg);
+    assert_eq!(incr[0].message_count, baseline[0].message_count);
+}
+
+#[test]
+fn test_incremental_skips_parse_when_mtime_matches() {
+    // Build a session, then capture its UnifiedSession as prior. Overwrite
+    // events.jsonl with garbage that would fail the message-count filter
+    // (<4 messages) — when prior matches, the incremental path should NOT
+    // touch events.jsonl, so the session still surfaces.
+    let tmp = TempDir::new().unwrap();
+    make_session(
+        &tmp,
+        "sess-keep",
+        "id: sess-keep\ncwd: /home/user/proj\nupdated_at: 2026-01-01T00:00:00Z\n",
+        FOUR_MSGS,
+    );
+    let baseline = list_copilot_sessions_from_dir(tmp.path()).unwrap();
+    assert_eq!(baseline.len(), 1);
+    let prior_vec: Vec<UnifiedSession> = baseline.clone();
+    let map: PriorById = prior_vec
+        .iter()
+        .map(|s| (s.session_id.as_str(), s))
+        .collect();
+
+    // Replace events.jsonl with too-few messages — non-incremental would
+    // now drop this session.
+    fs::write(
+        tmp.path().join("sess-keep").join("events.jsonl"),
+        "{\"type\":\"user.message\",\"data\":{\"content\":\"only-one\"}}\n",
+    )
+    .unwrap();
+    let dropped = list_copilot_sessions_from_dir(tmp.path()).unwrap();
+    assert_eq!(
+        dropped.len(),
+        0,
+        "non-incremental drops short-event sessions"
+    );
+
+    // Incremental path should still return the session because mtime
+    // matches prior — proving events.jsonl was NOT read.
+    let incr = list_copilot_sessions_from_dir_incremental(tmp.path(), &map).unwrap();
+    assert_eq!(incr.len(), 1);
+    assert_eq!(incr[0].session_id, "sess-keep");
+}
+
+#[test]
+fn test_incremental_reparses_when_mtime_advances() {
+    let tmp = TempDir::new().unwrap();
+    make_session(
+        &tmp,
+        "sess-bump",
+        "id: sess-bump\ncwd: /home/user/proj\nupdated_at: 2026-01-01T00:00:00Z\n",
+        FOUR_MSGS,
+    );
+    let baseline = list_copilot_sessions_from_dir(tmp.path()).unwrap();
+    let prior_vec: Vec<UnifiedSession> = baseline.clone();
+    let map: PriorById = prior_vec
+        .iter()
+        .map(|s| (s.session_id.as_str(), s))
+        .collect();
+
+    // Bump updated_at — prior mtime no longer matches, so incremental must
+    // re-parse events.jsonl.
+    fs::write(
+        tmp.path().join("sess-bump").join("workspace.yaml"),
+        "id: sess-bump\ncwd: /home/user/proj\nupdated_at: 2026-02-02T00:00:00Z\n",
+    )
+    .unwrap();
+    let incr = list_copilot_sessions_from_dir_incremental(tmp.path(), &map).unwrap();
+    assert_eq!(incr.len(), 1);
+    // The new modified time is the freshly parsed one, not the prior.
+    assert_ne!(incr[0].modified, baseline[0].modified);
 }

@@ -1,5 +1,7 @@
+use crate::liveness::{self, CachedLiveness, Liveness};
+use crate::refresh::{self, RefreshResult};
 use crate::theme;
-use crate::unified::{list_all_sessions, SessionSource, UnifiedSession};
+use crate::unified::{SessionSource, UnifiedSession};
 use anyhow::Result;
 use crossterm::{
     event::{self, Event, KeyCode, KeyModifiers},
@@ -15,8 +17,53 @@ use ratatui::{
     Terminal,
 };
 use std::io::stdout;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use tokio::sync::mpsc;
+
+/// Subset of `UnifiedSession` shipped from the UI thread to the liveness
+/// polling task on each visibility change. Cheap to clone (~5 small
+/// fields per visible session).
+#[derive(Clone)]
+struct VisibleSnapshot {
+    session_id: String,
+    source: crate::unified::SessionSource,
+    jsonl_path: Option<String>,
+    modified: std::time::SystemTime,
+}
+
+impl VisibleSnapshot {
+    fn from_session(s: &crate::unified::UnifiedSession) -> Self {
+        Self {
+            session_id: s.session_id.clone(),
+            source: s.source.clone(),
+            jsonl_path: s.jsonl_path.clone(),
+            modified: s.modified,
+        }
+    }
+
+    /// Adapt to a temporary `UnifiedSession` for `liveness::detect`.
+    /// Only `source`, `jsonl_path`, and `modified` are read by the
+    /// detector today; the other fields are filled with defaults. If
+    /// `liveness::detect` ever starts reading additional fields, this
+    /// adapter will silently produce wrong results — update it then.
+    fn as_unified(&self) -> crate::unified::UnifiedSession {
+        crate::unified::UnifiedSession {
+            session_id: self.session_id.clone(),
+            project_name: String::new(),
+            project_path: String::new(),
+            modified: self.modified,
+            message_count: 0,
+            first_user_msg: String::new(),
+            summary: String::new(),
+            git_branch: String::new(),
+            source: self.source.clone(),
+            jsonl_path: self.jsonl_path.clone(),
+            archived: false,
+        }
+    }
+}
 
 #[derive(PartialEq, Copy, Clone)]
 enum Focus {
@@ -160,6 +207,45 @@ struct AppState {
     /// Index of the focused block in `turn_detail.blocks`. 0 by default; reset
     /// on every turn navigation.
     turn_detail_focused: usize,
+    /// Global in-flight guard for the session re-scan triggered by `R` / `F5`.
+    /// Lighter than the per-session HashSet pattern (`generating`,
+    /// `insights_loading`) because refresh is one global action.
+    refreshing: Arc<AtomicBool>,
+    /// Channel for receiving completed re-scan results from the background task.
+    refresh_tx: mpsc::UnboundedSender<Result<RefreshResult, String>>,
+    refresh_rx: mpsc::UnboundedReceiver<Result<RefreshResult, String>>,
+    /// `true` once the first refresh attempt has completed, regardless of
+    /// success or failure. Gates the "Loading sessions…" placeholder so it
+    /// disappears even when the initial scan errors out.
+    did_initial_load: bool,
+    /// `true` once the git-status batch has been kicked off after a successful
+    /// initial scan. Decoupled from `did_initial_load` so a transient first-
+    /// scan error doesn't permanently disarm the git batch.
+    did_initial_git_batch: bool,
+    /// Cached liveness keyed by `session_id`. Populated by the polling
+    /// task; read by the renderer with idle-decay applied.
+    liveness_cache: Arc<Mutex<std::collections::HashMap<String, CachedLiveness>>>,
+    /// Channel: polling task → UI thread. Carries per-tick liveness updates.
+    liveness_rx: mpsc::UnboundedReceiver<std::collections::HashMap<String, Liveness>>,
+    /// Channel: UI thread → polling task. Sends the latest visibility snapshot.
+    visible_tx: mpsc::UnboundedSender<Vec<VisibleSnapshot>>,
+    /// Cached visibility set used to detect changes and avoid re-sending.
+    last_visible_ids: std::collections::HashSet<String>,
+    /// `Some(handle)` while the local web server is running. Toggle via `W`.
+    web_handle: Option<crate::web::WebServerHandle>,
+}
+
+/// RAII guard that clears the `refreshing` atomic flag when dropped, so a
+/// panic inside the spawned scan task can't leave the flag stuck-set and
+/// permanently block future refreshes.
+struct RefreshInflightGuard {
+    flag: Arc<AtomicBool>,
+}
+
+impl Drop for RefreshInflightGuard {
+    fn drop(&mut self) {
+        self.flag.store(false, Ordering::SeqCst);
+    }
 }
 
 impl AppState {
@@ -188,6 +274,12 @@ impl AppState {
         let parent_of = crate::store::load_all_links(&conn).unwrap_or_default();
         let insights_cache = crate::store::load_all_insights(&conn).unwrap_or_default();
         let settings = crate::settings::load(&conn);
+        let (refresh_tx, refresh_rx) = mpsc::unbounded_channel::<Result<RefreshResult, String>>();
+        let (liveness_tx, liveness_rx) =
+            mpsc::unbounded_channel::<std::collections::HashMap<String, Liveness>>();
+        let (visible_tx, visible_rx) = mpsc::unbounded_channel::<Vec<VisibleSnapshot>>();
+        let liveness_cache: Arc<Mutex<std::collections::HashMap<String, CachedLiveness>>> =
+            Arc::new(Mutex::new(std::collections::HashMap::new()));
         let mut state = Self {
             filtered_active: (0..n).collect(),
             filtered_archived: vec![],
@@ -245,12 +337,36 @@ impl AppState {
             turn_detail_scroll: 0,
             turn_detail_expanded: std::collections::HashSet::new(),
             turn_detail_focused: 0,
+            refreshing: Arc::new(AtomicBool::new(false)),
+            refresh_tx,
+            refresh_rx,
+            did_initial_load: false,
+            did_initial_git_batch: false,
+            liveness_cache: liveness_cache.clone(),
+            liveness_rx,
+            visible_tx,
+            last_visible_ids: std::collections::HashSet::new(),
+            web_handle: None,
         };
         // Split archived out of the active list on startup so the "all" view
         // correctly shows archived sessions in the bottom-left panel.
         state.apply_filter();
         state.rebuild_projects();
+        spawn_liveness_polling_task(liveness_tx, visible_rx);
         Ok(state)
+    }
+
+    /// Build a `WebState` snapshot for the local web server. Sessions are
+    /// captured at the moment `W` is pressed; the liveness cache is shared
+    /// live (Arc clone). To pick up new sessions added by a refresh, the
+    /// user toggles `W` off and on.
+    fn web_state(&self) -> crate::web::WebState {
+        let sessions = std::sync::Arc::new(std::sync::Mutex::new(self.sessions.clone()));
+        crate::web::WebState {
+            sessions,
+            liveness_cache: self.liveness_cache.clone(),
+            tailer_registry: crate::web::tailer::TailerRegistry::default(),
+        }
     }
 
     /// Rebuild per-session haystacks for grep mode. Each haystack is lowercased
@@ -551,6 +667,218 @@ impl AppState {
             }
         }
     }
+
+    /// Trigger a non-blocking re-scan of all session sources. If a refresh is
+    /// already in flight, this call is a no-op (the user pressing `R` while a
+    /// scan is running shouldn't stack up scans).
+    pub fn refresh_sessions(&self) {
+        if self.refreshing.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let prior: Vec<UnifiedSession> = self.sessions.clone();
+        let tx = self.refresh_tx.clone();
+        let flag = self.refreshing.clone();
+
+        tokio::spawn(async move {
+            // Guard ensures the in-flight flag is cleared even if anything
+            // below panics — otherwise a stuck flag would block all future
+            // refreshes until the TUI is restarted.
+            let _guard = RefreshInflightGuard { flag };
+
+            // The incremental lister consults `prior` and skips per-session
+            // parses for unchanged sessions; on a 400+ session corpus this
+            // turns refresh into a stat-only walk in the common case.
+            let prior_for_scan = prior.clone();
+            let outcome: Result<Vec<UnifiedSession>, String> =
+                match tokio::task::spawn_blocking(move || {
+                    crate::unified::list_all_sessions_incremental(&prior_for_scan)
+                })
+                .await
+                {
+                    Ok(Ok(sessions)) => Ok(sessions),
+                    Ok(Err(e)) => Err(format!("scan failed: {e}")),
+                    Err(e) => Err(format!("scan task panicked: {e}")),
+                };
+
+            let payload = outcome.map(|new| refresh::compute_refresh_diff(&prior, new));
+            // Only fails if the receiver was dropped (app shutting down).
+            let _ = tx.send(payload);
+        });
+    }
+
+    /// Pull any pending refresh results out of the channel, replace the
+    /// in-memory session list, re-apply filters, restore selection by
+    /// `session_id`, and emit a status-line toast. Called once per event-loop
+    /// iteration before drawing.
+    pub fn drain_refresh_results(&mut self) {
+        // Capture selection IDs from BOTH lists so the user's selection is
+        // preserved regardless of which panel currently has focus.
+        let prior_active_id: Option<String> = self
+            .list_state_active
+            .selected()
+            .and_then(|i| self.filtered_active.get(i).copied())
+            .and_then(|raw| self.sessions.get(raw))
+            .map(|s| s.session_id.clone());
+        let prior_archived_id: Option<String> = self
+            .list_state_archived
+            .selected()
+            .and_then(|i| self.filtered_archived.get(i).copied())
+            .and_then(|raw| self.sessions.get(raw))
+            .map(|s| s.session_id.clone());
+
+        let mut latest: Option<Result<RefreshResult, String>> = None;
+        while let Ok(r) = self.refresh_rx.try_recv() {
+            latest = Some(r);
+        }
+        let Some(outcome) = latest else { return };
+
+        match outcome {
+            Ok(r) => {
+                let total = r.sessions.len();
+                self.sessions = r.sessions;
+                self.apply_filter();
+
+                let new_active = refresh::select_index_for_session_id(
+                    &self.filtered_active,
+                    &self.sessions,
+                    prior_active_id.as_deref(),
+                );
+                self.list_state_active.select(new_active);
+                let new_archived = refresh::select_index_for_session_id(
+                    &self.filtered_archived,
+                    &self.sessions,
+                    prior_archived_id.as_deref(),
+                );
+                self.list_state_archived.select(new_archived);
+
+                let toast_text = if r.new_count == 0 && r.updated_count == 0 {
+                    format!("Refreshed: {total} sessions (no changes)")
+                } else {
+                    format!(
+                        "Refreshed: {total} sessions (+{} new, {} updated)",
+                        r.new_count, r.updated_count
+                    )
+                };
+                self.status_msg = Some((toast_text, Instant::now()));
+
+                self.did_initial_load = true;
+                if !self.did_initial_git_batch {
+                    self.did_initial_git_batch = true;
+                    spawn_git_status_batch(self);
+                }
+            }
+            Err(msg) => {
+                self.status_msg = Some((format!("Refresh failed: {msg}"), Instant::now()));
+                // Hide the "Loading sessions…" placeholder so the user isn't
+                // misled into thinking work is still in progress. The git
+                // batch stays armed until the next successful scan.
+                self.did_initial_load = true;
+            }
+        }
+    }
+
+    /// Pull pending liveness updates from the polling task and merge
+    /// them into `liveness_cache` with the current `Instant`. Called
+    /// once per event-loop iteration.
+    pub fn drain_liveness(&mut self) {
+        let now = std::time::Instant::now();
+        let mut updates: std::collections::HashMap<String, Liveness> = Default::default();
+        while let Ok(batch) = self.liveness_rx.try_recv() {
+            for (id, state) in batch {
+                updates.insert(id, state);
+            }
+        }
+        if updates.is_empty() {
+            return;
+        }
+        let mut cache = self
+            .liveness_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for (id, state) in updates {
+            cache.insert(
+                id,
+                CachedLiveness {
+                    state,
+                    observed_at: now,
+                },
+            );
+        }
+    }
+
+    /// Compute the current visibility snapshot — a deduped subset of
+    /// `self.sessions` corresponding to rows likely visible in the
+    /// active or archived list. Uses a fixed slack instead of measuring
+    /// the rendered viewport height (good enough for any reasonable
+    /// terminal size; over-eager polling is cheap).
+    fn compute_visible(&self) -> Vec<VisibleSnapshot> {
+        const SLACK: usize = 25;
+        let mut snap: Vec<VisibleSnapshot> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        for (list_state, filtered) in [
+            (&self.list_state_active, &self.filtered_active),
+            (&self.list_state_archived, &self.filtered_archived),
+        ] {
+            let center = list_state.selected().unwrap_or(0);
+            let lo = center.saturating_sub(SLACK);
+            let hi = (center + SLACK).min(filtered.len());
+            for &raw in filtered[lo..hi].iter() {
+                if let Some(s) = self.sessions.get(raw) {
+                    if seen.insert(s.session_id.clone()) {
+                        snap.push(VisibleSnapshot::from_session(s));
+                    }
+                }
+            }
+        }
+
+        snap
+    }
+
+    /// Push the current visibility snapshot to the polling task, but
+    /// only when the set of session IDs actually changed since last
+    /// push. Called once per event-loop iteration after `drain_*`.
+    pub fn push_visible_if_changed(&mut self) {
+        let snap = self.compute_visible();
+        let new_ids: std::collections::HashSet<String> =
+            snap.iter().map(|s| s.session_id.clone()).collect();
+        if new_ids == self.last_visible_ids {
+            return;
+        }
+
+        // Identify sessions that just entered the viewport — they get an
+        // immediate one-shot detect to avoid the up-to-5s polling lag.
+        let newly_visible: Vec<VisibleSnapshot> = snap
+            .iter()
+            .filter(|s| !self.last_visible_ids.contains(&s.session_id))
+            .cloned()
+            .collect();
+
+        self.last_visible_ids = new_ids;
+        let _ = self.visible_tx.send(snap);
+
+        if !newly_visible.is_empty() {
+            let cache = self.liveness_cache.clone();
+            tokio::task::spawn_blocking(move || {
+                let now = std::time::Instant::now();
+                let mut updates: Vec<(String, Liveness)> = Vec::new();
+                for vs in &newly_visible {
+                    let session = vs.as_unified();
+                    updates.push((vs.session_id.clone(), liveness::detect(&session)));
+                }
+                let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+                for (id, state) in updates {
+                    guard.insert(
+                        id,
+                        CachedLiveness {
+                            state,
+                            observed_at: now,
+                        },
+                    );
+                }
+            });
+        }
+    }
 }
 
 /// Split a filter query into `(tag_tokens, text_tokens)`. Whitespace-delimited
@@ -620,6 +948,52 @@ pub fn build_project_rows(
         }
     }
     acc.into_values().collect()
+}
+
+/// Spawn the background liveness polling task. The task ticks every
+/// `LIVE_WINDOW_SECS` seconds and runs `liveness::detect` on whichever
+/// sessions are currently visible (received via `visible_rx`). Results
+/// stream back to the UI thread via `liveness_tx`. The task ends when
+/// either channel closes (i.e., when the app shuts down).
+fn spawn_liveness_polling_task(
+    liveness_tx: mpsc::UnboundedSender<std::collections::HashMap<String, Liveness>>,
+    mut visible_rx: mpsc::UnboundedReceiver<Vec<VisibleSnapshot>>,
+) {
+    use tokio::time::{interval, Duration, MissedTickBehavior};
+
+    tokio::spawn(async move {
+        let mut tick = interval(Duration::from_secs(liveness::LIVE_WINDOW_SECS));
+        tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let mut current_visible: Vec<VisibleSnapshot> = Vec::new();
+
+        loop {
+            tokio::select! {
+                _ = tick.tick() => {
+                    if current_visible.is_empty() {
+                        continue;
+                    }
+                    let snapshot = current_visible.clone();
+                    let tx = liveness_tx.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let mut out = std::collections::HashMap::new();
+                        for vs in &snapshot {
+                            let session = vs.as_unified();
+                            out.insert(vs.session_id.clone(), liveness::detect(&session));
+                        }
+                        let _ = tx.send(out);
+                    });
+                }
+                Some(latest) = visible_rx.recv() => {
+                    let mut latest = latest;
+                    while let Ok(newer) = visible_rx.try_recv() {
+                        latest = newer;
+                    }
+                    current_visible = latest;
+                }
+                else => break,
+            }
+        }
+    });
 }
 
 /// Walk every unique project_path across all sessions and dispatch a git
@@ -863,8 +1237,6 @@ fn maybe_spawn_insights_load(app: &AppState) {
 }
 
 pub async fn run() -> Result<()> {
-    let sessions = list_all_sessions()?;
-
     let conn = crate::store::open_db()?;
     crate::store::migrate_from_files(&conn)?;
 
@@ -874,17 +1246,14 @@ pub async fn run() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = AppState::new(sessions, conn)?;
+    // Boot with an empty list; the first event-loop tick fires a refresh that
+    // populates it. Keeps "load sessions" on a single async path and matches
+    // the TUI invariant that I/O never blocks the UI.
+    let mut app = AppState::new(Vec::new(), conn)?;
+    app.refresh_sessions();
 
-    // Kick off git status checks for each unique project path in parallel.
-    // Cache is shared; results land while the TUI renders. First frame may
-    // show blank indicators; subsequent redraws pick up completed entries.
-    spawn_git_status_batch(&app);
-
-    // Run event loop, always clean up terminal regardless of result
     let result = run_event_loop(&mut terminal, &mut app).await;
 
-    // Always clean up terminal
     let _ = disable_raw_mode();
     let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
     let _ = terminal.show_cursor();
@@ -897,6 +1266,9 @@ async fn run_event_loop(
     app: &mut AppState,
 ) -> Result<()> {
     loop {
+        app.drain_refresh_results();
+        app.drain_liveness();
+        app.push_visible_if_changed();
         maybe_refresh_selected_git(app);
         terminal.draw(|f| draw(f, app))?;
 
@@ -1476,9 +1848,90 @@ async fn run_event_loop(
                         app.status_msg = Some(("refreshing git…".to_string(), Instant::now()));
                     }
 
+                    // R / F5: re-scan all session sources without restarting the TUI.
+                    // Active in Normal, Library, and Projects modes.
+                    (AppMode::Normal, KeyModifiers::NONE, KeyCode::Char('R'))
+                    | (AppMode::Library, KeyModifiers::NONE, KeyCode::Char('R'))
+                    | (AppMode::Projects, KeyModifiers::NONE, KeyCode::Char('R'))
+                    | (AppMode::Normal, KeyModifiers::NONE, KeyCode::F(5))
+                    | (AppMode::Library, KeyModifiers::NONE, KeyCode::F(5))
+                    | (AppMode::Projects, KeyModifiers::NONE, KeyCode::F(5)) => {
+                        app.refresh_sessions();
+                    }
+
                     // i: toggle the Insights panel above the Summary
                     (AppMode::Normal, KeyModifiers::NONE, KeyCode::Char('i')) => {
                         app.insights_visible = !app.insights_visible;
+                    }
+
+                    // W: toggle the local web companion server.
+                    // `_` modifier so Shift+W (which produces 'W') matches
+                    // regardless of whether the terminal reports SHIFT or NONE.
+                    (AppMode::Normal, _, KeyCode::Char('W')) => match app.web_handle.take() {
+                        Some(handle) => {
+                            handle.shutdown();
+                            app.status_msg = Some(("web stopped".to_string(), Instant::now()));
+                        }
+                        None => {
+                            let state = app.web_state();
+                            match crate::web::start(state).await {
+                                Ok(handle) => {
+                                    let msg = format!("web: http://{}", handle.addr);
+                                    app.web_handle = Some(handle);
+                                    app.status_msg = Some((msg, Instant::now()));
+                                }
+                                Err(e) => {
+                                    app.status_msg =
+                                        Some((format!("web start failed: {e}"), Instant::now()));
+                                }
+                            }
+                        }
+                    },
+
+                    // Ctrl+B: open the running web URL in the default browser
+                    // (`o` is taken by Obsidian save in Normal mode, so use Ctrl+B for "browser").
+                    (AppMode::Normal, KeyModifiers::CONTROL, KeyCode::Char('b')) => {
+                        if let Some(ref h) = app.web_handle {
+                            let url = format!("http://{}", h.addr);
+                            let result = if cfg!(target_os = "macos") {
+                                std::process::Command::new("open").arg(&url).spawn()
+                            } else if cfg!(target_os = "windows") {
+                                std::process::Command::new("cmd")
+                                    .args(["/C", "start", &url])
+                                    .spawn()
+                            } else {
+                                std::process::Command::new("xdg-open").arg(&url).spawn()
+                            };
+                            app.status_msg = Some(match result {
+                                Ok(_) => ("opened in browser".to_string(), Instant::now()),
+                                Err(e) => (format!("open failed: {e}"), Instant::now()),
+                            });
+                        } else {
+                            app.status_msg = Some((
+                                "web not running (press W to start)".to_string(),
+                                Instant::now(),
+                            ));
+                        }
+                    }
+
+                    // y: yank the running web URL to the clipboard
+                    (AppMode::Normal, KeyModifiers::NONE, KeyCode::Char('y')) => {
+                        if let Some(ref h) = app.web_handle {
+                            let url = format!("http://{}", h.addr);
+                            let msg = match arboard::Clipboard::new() {
+                                Ok(mut cb) => match cb.set_text(url.clone()) {
+                                    Ok(_) => "URL copied".to_string(),
+                                    Err(e) => format!("clipboard error: {e}"),
+                                },
+                                Err(e) => format!("clipboard unavailable: {e}"),
+                            };
+                            app.status_msg = Some((msg, Instant::now()));
+                        } else {
+                            app.status_msg = Some((
+                                "web not running (press W to start)".to_string(),
+                                Instant::now(),
+                            ));
+                        }
                     }
 
                     // ] / [ / { / } — glyph timeline navigation in the Insights panel.
@@ -2340,6 +2793,11 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
         AppMode::ActionMenu => ("".to_string(), " cc-speedy "),
         AppMode::Settings => ("".to_string(), " cc-speedy — Settings "),
         AppMode::Library => {
+            let prefix = if app.refreshing.load(Ordering::SeqCst) {
+                "↻ "
+            } else {
+                ""
+            };
             let cat_label = match app.library_category.as_deref() {
                 Some("decision_points") => "decisions",
                 Some("lessons_gotchas") => "lessons",
@@ -2348,8 +2806,8 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
             };
             let n = app.library_filtered.len();
             (
-                format!("  [{}]  {} entr{}  (/: filter  0:all  1:dec  2:lsn  3:tol  Enter: jump  Esc: exit)",
-                        cat_label, n, if n == 1 { "y" } else { "ies" }),
+                format!("{}  [{}]  {} entr{}  (/: filter  0:all  1:dec  2:lsn  3:tol  Enter: jump  Esc: exit)",
+                        prefix, cat_label, n, if n == 1 { "y" } else { "ies" }),
                 " Learning Library ",
             )
         }
@@ -2358,6 +2816,11 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
             " Library — Filter  [Esc: clear  Enter: apply] ",
         ),
         AppMode::Projects => {
+            let prefix = if app.refreshing.load(Ordering::SeqCst) {
+                "↻ "
+            } else {
+                ""
+            };
             let sort_label = match app.projects_sort {
                 ProjectSort::LastActive => "last active",
                 ProjectSort::SessionCount => "session count",
@@ -2372,7 +2835,8 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
             let n = app.projects_filtered.len();
             (
                 format!(
-                    "  sort: {}  ·  src: {}  ·  {} project{}  (/: search  s: sort  →: enter  q: quit)",
+                    "{}  sort: {}  ·  src: {}  ·  {} project{}  (/: search  s: sort  →: enter  q: quit)",
+                    prefix,
                     sort_label,
                     src_tag,
                     n,
@@ -2408,26 +2872,43 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
         AppMode::Help => ("".to_string(), " cc-speedy — Help "),
         AppMode::TurnDetail => ("".to_string(), " cc-speedy "),
         AppMode::Normal => {
+            let prefix = if app.refreshing.load(Ordering::SeqCst) {
+                "↻ "
+            } else {
+                ""
+            };
             let src_tag = match &app.source_filter {
                 None => "all",
                 Some(crate::unified::SessionSource::ClaudeCode) => "CC",
                 Some(crate::unified::SessionSource::OpenCode) => "OC",
                 Some(crate::unified::SessionSource::Copilot) => "CO",
             };
+            let web_suffix = match &app.web_handle {
+                Some(h) => format!("  · web: http://{}", h.addr),
+                None => String::new(),
+            };
             let hint = if let Some(ref pp) = app.project_filter {
                 if app.filter.is_empty() {
                     format!(
-                        "  project: {}  [src: {}]  (← projects · / search)",
+                        "{}  project: {}  [src: {}]  (← projects · / search){}",
+                        prefix,
                         crate::util::path_last_n(pp, 2),
-                        src_tag
+                        src_tag,
+                        web_suffix
                     )
                 } else {
-                    format!("  filter: {}  (Esc clear)", app.filter)
+                    format!(
+                        "{}  filter: {}  (Esc clear){}",
+                        prefix, app.filter, web_suffix
+                    )
                 }
             } else if app.filter.is_empty() {
-                "  (F1: help  /: filter  ?: grep  L: library)".to_string()
+                format!(
+                    "{}  (F1: help  /: filter  ?: grep  L: library){}",
+                    prefix, web_suffix
+                )
             } else {
-                format!("  filter: {}", app.filter)
+                format!("{}  filter: {}{}", prefix, app.filter, web_suffix)
             };
             (hint, " cc-speedy ")
         }
@@ -2479,6 +2960,14 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
+        // Same pattern as git_cache: clone-and-drop-the-lock so we don't hold
+        // it across the two draw_list calls (the polling task and one-shot
+        // detect both write to this cache).
+        let liveness_cache = app
+            .liveness_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let generating_set = app
             .generating
             .lock()
@@ -2495,6 +2984,7 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
 
+        let show_loading = app.sessions.is_empty() && !app.did_initial_load;
         draw_list(
             f,
             list_panes[0],
@@ -2503,12 +2993,14 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
             &has_learnings_set,
             &obsidian_synced_set,
             &git_cache,
+            &liveness_cache,
             &generating_set,
             &app.filtered_active,
             &mut app.list_state_active,
             "Sessions",
             Focus::ActiveList,
             app.focus,
+            show_loading,
         );
         if archived_count > 0 {
             draw_list(
@@ -2519,12 +3011,14 @@ fn draw(f: &mut ratatui::Frame, app: &mut AppState) {
                 &has_learnings_set,
                 &obsidian_synced_set,
                 &git_cache,
+                &liveness_cache,
                 &generating_set,
                 &app.filtered_archived,
                 &mut app.list_state_archived,
                 "Archived",
                 Focus::ArchivedList,
                 app.focus,
+                false,
             );
         }
 
@@ -2878,15 +3372,17 @@ fn draw_list(
     has_learnings: &std::collections::HashSet<String>,
     obsidian_synced: &std::collections::HashSet<String>,
     git_cache: &std::collections::HashMap<String, (crate::git_status::GitStatus, Instant)>,
+    liveness_cache: &std::collections::HashMap<String, CachedLiveness>,
     generating: &std::collections::HashSet<String>,
     indices: &[usize],
     list_state: &mut ListState,
     title: &str,
     focus: Focus,
     current_focus: Focus,
+    show_loading_placeholder: bool,
 ) {
     let spinner = spinner_glyph();
-    let items: Vec<ListItem> = indices
+    let mut items: Vec<ListItem> = indices
         .iter()
         .map(|&i| {
             let s = &sessions[i];
@@ -2924,6 +3420,7 @@ fn draw_list(
                 pin_span,
                 Span::styled(format!("{} ", dt), theme::dim_style()),
                 Span::styled(format!("{} ", badge_text), Style::default().fg(badge_color)),
+                liveness_span(&s.session_id, liveness_cache),
                 kb_span,
                 obs_span,
                 git_span,
@@ -2934,6 +3431,13 @@ fn draw_list(
             ListItem::new(line)
         })
         .collect();
+
+    if items.is_empty() && show_loading_placeholder {
+        items.push(ListItem::new(Span::styled(
+            "Loading sessions…",
+            theme::dim_style(),
+        )));
+    }
 
     let count = items.len();
     let is_focused = current_focus == focus;
@@ -2960,7 +3464,7 @@ fn draw_list(
         .split(inner);
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            "  ★   date        src  ✓ ◆ ●  title                   msgs  folder",
+            "  ★   date        src  ▶ ✓ ◆ ●  title                   msgs  folder",
             theme::dim_style(),
         ))),
         inner_split[0],
@@ -3462,6 +3966,45 @@ fn draw_preview(f: &mut ratatui::Frame, app: &mut AppState, area: Rect, scroll: 
     f.render_widget(preview, area);
 }
 
+/// Render the single-column liveness glyph for a session.
+/// Returns a 2-column span: glyph + trailing space. Blank pair for `Idle`.
+/// Applies the idle-decay rule: a `Live` cached more than `LIVE_WINDOW_SECS`
+/// ago is displayed as `Recent` until the next poll overwrites the entry.
+fn liveness_span(
+    session_id: &str,
+    cache: &std::collections::HashMap<String, CachedLiveness>,
+) -> Span<'static> {
+    use std::time::{Duration, Instant};
+    let entry = cache.get(session_id);
+    let live_window = Duration::from_secs(liveness::LIVE_WINDOW_SECS);
+    let display_state = match entry {
+        None => Liveness::Idle,
+        Some(c) => {
+            // Idle-decay: a `Live` cached more than LIVE_WINDOW_SECS ago is
+            // displayed as Recent until the next poll overwrites.
+            if c.state == Liveness::Live
+                && Instant::now().saturating_duration_since(c.observed_at) > live_window
+            {
+                Liveness::Recent
+            } else {
+                c.state
+            }
+        }
+    };
+
+    match display_state {
+        Liveness::Live => Span::styled(
+            "▶ ",
+            Style::default().fg(ratatui::style::Color::Rgb(0xa6, 0xe3, 0xa1)),
+        ),
+        Liveness::Recent => Span::styled(
+            "◦ ",
+            Style::default().fg(ratatui::style::Color::Rgb(0x89, 0xdc, 0xeb)),
+        ),
+        Liveness::Idle => Span::raw("  "),
+    }
+}
+
 /// Render the single-column git status glyph for a project path.
 /// Returns a 2-column span: glyph + trailing space. Blank pair when the
 /// cache has no entry yet (pending first check).
@@ -3893,6 +4436,19 @@ fn draw_help_popup(f: &mut ratatui::Frame, area: Rect) {
             Span::raw("    "),
             Span::styled("*", theme::pin_style()),
             Span::raw("  pinned    "),
+            Span::styled(
+                "▶",
+                Style::default().fg(ratatui::style::Color::Rgb(0xa6, 0xe3, 0xa1)),
+            ),
+            Span::raw("  agent live    "),
+            Span::styled(
+                "◦",
+                Style::default().fg(ratatui::style::Color::Rgb(0x89, 0xdc, 0xeb)),
+            ),
+            Span::raw("  active recently"),
+        ]),
+        Line::from(vec![
+            Span::raw("    "),
             Span::styled("✓", Style::default().fg(theme::TITLE)),
             Span::raw("  has learnings    "),
             Span::styled("◆", Style::default().fg(theme::OBSIDIAN_PURPLE)),
@@ -3900,6 +4456,9 @@ fn draw_help_popup(f: &mut ratatui::Frame, area: Rect) {
         ]),
         Line::from(""),
         Line::from(vec![Span::styled("  App", theme::title_style())]),
+        Line::from("    R / F5       refresh — rescan all session sources"),
+        Line::from("    W            toggle local web server (browser companion)"),
+        Line::from("    Ctrl+B       open web URL in default browser   |   y  yank URL"),
         Line::from("    s            settings   |   F1  this help   |   q  quit"),
         Line::from(""),
         Line::from(vec![Span::styled(

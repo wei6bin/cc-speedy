@@ -160,6 +160,99 @@ pub fn query_sessions_from_conn(conn: &Connection) -> Result<Vec<UnifiedSession>
     Ok(sessions)
 }
 
+/// Incremental variant of `list_opencode_sessions` for refresh. Skips the
+/// per-session `query_first_user_text` query when `prior_by_id` already has
+/// the session at a matching `time_updated`.
+pub fn list_opencode_sessions_incremental(
+    prior_by_id: &crate::unified::PriorById<'_>,
+) -> Result<Vec<UnifiedSession>> {
+    let path = match opencode_db_path() {
+        Some(p) if p.exists() => p,
+        _ => return Ok(vec![]),
+    };
+    let conn = Connection::open(&path)?;
+    query_sessions_from_conn_incremental(&conn, prior_by_id)
+}
+
+/// Same shape as `query_sessions_from_conn` but with prior-aware short-
+/// circuiting on `time_updated`.
+pub fn query_sessions_from_conn_incremental(
+    conn: &Connection,
+    prior_by_id: &crate::unified::PriorById<'_>,
+) -> Result<Vec<UnifiedSession>> {
+    let mut stmt = conn.prepare(
+        "
+        SELECT
+            s.id,
+            COALESCE(s.title, ''),
+            s.time_updated,
+            p.worktree,
+            COUNT(DISTINCT m.id) AS message_count
+        FROM session s
+        JOIN project p ON p.id = s.project_id
+        LEFT JOIN message m ON m.session_id = s.id
+        WHERE s.time_archived IS NULL
+          AND s.parent_id IS NULL
+        GROUP BY s.id
+        ORDER BY s.time_updated DESC
+    ",
+    )?;
+
+    let rows: Vec<(String, String, i64, String, usize)> = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, usize>(4)?,
+            ))
+        })?
+        .filter_map(|r| match r {
+            Ok(v) => Some(v),
+            Err(e) => {
+                #[cfg(debug_assertions)]
+                eprintln!("cc-speedy: skipping malformed session row: {}", e);
+                None
+            }
+        })
+        .collect();
+
+    let mut sessions = Vec::with_capacity(rows.len());
+    for (id, title, time_updated_ms, worktree, message_count) in rows {
+        let modified = UNIX_EPOCH + Duration::from_millis(time_updated_ms.max(0) as u64);
+
+        // Skip the extra query_first_user_text call when prior already has
+        // this session at the same mtime.
+        if let Some(reused) = crate::unified::try_reuse_prior(prior_by_id, &id, modified) {
+            sessions.push(reused);
+            continue;
+        }
+
+        let first_user_msg = query_first_user_text(conn, &id)
+            .unwrap_or_default()
+            .chars()
+            .take(80)
+            .collect();
+        let project_name = crate::util::path_last_n(&worktree, 2);
+
+        sessions.push(UnifiedSession {
+            session_id: id,
+            project_name,
+            project_path: worktree,
+            modified,
+            message_count,
+            first_user_msg,
+            summary: title,
+            git_branch: String::new(),
+            source: SessionSource::OpenCode,
+            jsonl_path: opencode_db_path().map(|p| p.to_string_lossy().into_owned()),
+            archived: false,
+        });
+    }
+    Ok(sessions)
+}
+
 /// Retrieve the text of the first user `part` in a session.
 fn query_first_user_text(conn: &Connection, session_id: &str) -> Option<String> {
     // Parts of type "text" from the earliest message in the session.

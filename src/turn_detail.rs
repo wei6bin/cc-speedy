@@ -7,6 +7,7 @@
 //! stays manageable even for huge Bash outputs.
 
 use anyhow::{anyhow, Result};
+use serde::Serialize;
 use serde_json::Value;
 use std::path::Path;
 
@@ -15,7 +16,7 @@ use std::path::Path;
 pub const RESULT_BYTE_CAP: usize = 8 * 1024;
 
 /// Token usage for the focused turn.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct TurnUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -37,7 +38,7 @@ impl TurnUsage {
 }
 
 /// One paired tool_result. `content` may be truncated; check `truncated`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ToolResultDetail {
     pub is_error: bool,
     pub content: String,
@@ -47,7 +48,8 @@ pub struct ToolResultDetail {
 }
 
 /// One content block within an assistant turn.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DetailBlock {
     Thinking {
         /// Plaintext thinking text. Often empty in practice — CC redacts the
@@ -71,7 +73,7 @@ pub enum DetailBlock {
 }
 
 /// Everything the modal needs to render one assistant turn.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TurnDetail {
     /// 0-indexed turn position within the session.
     pub turn_idx: u32,
